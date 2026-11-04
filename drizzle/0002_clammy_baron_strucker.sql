@@ -1,0 +1,2 @@
+CREATE UNIQUE INDEX `projects_paypal_order_id_unique` ON `projects` (`paypal_order_id`);--> statement-breakpoint
+CREATE UNIQUE INDEX `projects_paypal_capture_id_unique` ON `projects` (`paypal_capture_id`);

@@ -8,6 +8,20 @@
       "when": 1793780231601,
       "tag": "0000_handy_shinobi_shaw",
       "breakpoints": true
+    },
+    {
+      "idx": 1,
+      "version": "6",
+      "when": 1793809964502,
+      "tag": "0001_sharp_valeria_richards",
+      "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "6",
+      "when": 1793810461452,
+      "tag": "0002_clammy_baron_strucker",
+      "breakpoints": true
     }
   ]
 }

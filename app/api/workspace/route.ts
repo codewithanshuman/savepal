@@ -1,9 +1,10 @@
 import { env } from "cloudflare:workers";
 import { getChatGPTUser } from "../../chatgpt-auth";
+import { CHECKER_VERSION, captureMatches, canApplyPaymentStatus, evaluateCriteria, parseUsdCents, providerPaymentStatus, readBoundedHtml, safeWebsiteUrl, type Criterion, type Finding, type WebsiteResult } from "../../../lib/assurance";
+import { appendAudit, verifyAudit } from "../../../lib/audit";
 
 export const runtime = "edge";
 
-type Criterion = { label: string; kind: "reachable" | "contains" | "manual"; needle?: string };
 type Project = {
   id: string; client_id: string; client_email: string; freelancer_email: string;
   title: string; description: string; amount_cents: number; currency: string;
@@ -12,22 +13,20 @@ type Project = {
   findings_json: string | null; evaluated_at: string | null; decision_reason: string | null;
   paypal_order_id: string | null; paypal_capture_id: string | null;
   payment_status: string; payment_request_id: string | null;
-  created_at: string; updated_at: string;
+  created_at: string; updated_at: string; latest_run_id: string | null;
 };
-type Finding = { label: string; status: "VERIFIED" | "FAILED" | "INCONCLUSIVE"; explanation: string; check: string };
 
 const db = () => {
   if (!env.DB) throw new Error("Database is unavailable");
   return env.DB;
 };
-const cfg = env as Cloudflare.Env & { PAYPAL_CLIENT_ID?: string; PAYPAL_CLIENT_SECRET?: string; OPENAI_API_KEY?: string; OPENAI_MODEL?: string };
+const cfg = env as Cloudflare.Env & { PAYPAL_CLIENT_ID?: string; PAYPAL_CLIENT_SECRET?: string; OPENAI_API_KEY?: string; OPENAI_MODEL?: string; AUDIT_HMAC_KEY?: string };
 const json = (data: unknown, status = 200) => Response.json(data, { status, headers: { "Cache-Control": "no-store" } });
 const now = () => new Date().toISOString();
 const fail = (message: string, status = 400) => json({ error: message }, status);
 
 async function event(projectId: string, actor: string, type: string, detail: string) {
-  await db().prepare("INSERT INTO audit_events (project_id, actor, type, detail, created_at) VALUES (?, ?, ?, ?, ?)")
-    .bind(projectId, actor, type, detail, now()).run();
+  await appendAudit(db(),projectId,actor,type,detail,cfg.AUDIT_HMAC_KEY);
 }
 async function project(id: string) {
   return db().prepare("SELECT * FROM projects WHERE id = ?").bind(id).first<Project>();
@@ -38,8 +37,10 @@ function role(p: Project, user: { userId: string; email: string }) {
   return null;
 }
 function view(p: Project, user: { userId: string; email: string }) {
+  const staleEvaluation = p.status === "EVALUATING" && new Date(p.updated_at).getTime() < Date.now() - 5 * 60_000;
   return {
     ...p,
+    status: staleEvaluation ? "SUBMITTED" : p.status,
     role: role(p, user),
     criteria: JSON.parse(p.criteria_json) as Criterion[],
     findings: p.findings_json ? JSON.parse(p.findings_json) as Finding[] : null,
@@ -55,33 +56,25 @@ export async function GET(request: Request) {
     const p = await project(id);
     if (!p || !role(p, user)) return fail("Agreement not found", 404);
     const audit = await db().prepare("SELECT actor, type, detail, created_at FROM audit_events WHERE project_id = ? ORDER BY id DESC").bind(id).all();
-    return json({ project: view(p, user), audit: audit.results });
+    const auditIntegrity = await verifyAudit(db(),id,cfg.AUDIT_HMAC_KEY);
+    return json({ project: view(p, user), audit: audit.results, auditIntegrity });
   }
   const rows = await db().prepare("SELECT * FROM projects WHERE client_id = ? OR lower(freelancer_email) = ? ORDER BY created_at DESC")
     .bind(user.userId, user.email.toLowerCase()).all<Project>();
   return json({ user: { name: user.displayName, email: user.email }, projects: rows.results.map(p => view(p, user)), paypalReady: !!(cfg.PAYPAL_CLIENT_ID && cfg.PAYPAL_CLIENT_SECRET), paypalClientId: cfg.PAYPAL_CLIENT_ID || null, aiReady: !!cfg.OPENAI_API_KEY });
 }
 
-function safeUrl(raw: unknown) {
-  if (typeof raw !== "string" || raw.length > 2000) return null;
-  try {
-    const url = new URL(raw);
-    const host = url.hostname.toLowerCase();
-    if (url.protocol !== "https:" || url.username || url.password || host === "localhost" || host.endsWith(".local") || host.endsWith(".internal") || /^\d+\.\d+\.\d+\.\d+$/.test(host) || host.includes(":")) return null;
-    return url.toString();
-  } catch { return null; }
-}
 async function sha256(value: string) {
   const bytes = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(value));
   return Array.from(new Uint8Array(bytes), b => b.toString(16).padStart(2, "0")).join("");
 }
-async function inspectWebsite(url: string) {
+async function inspectWebsite(url: string): Promise<WebsiteResult> {
   try {
     const res = await fetch(url, { redirect: "manual", signal: AbortSignal.timeout(8000), headers: { Accept: "text/html" } });
-    const type = res.headers.get("content-type") || "";
-    const body = res.ok && type.includes("text/html") ? (await res.text()).slice(0, 100000) : "";
-    return { status: res.status, body, contentType: type };
-  } catch { return { status: 0, body: "", contentType: "" }; }
+    const type = (res.headers.get("content-type") || "").toLowerCase();
+    const html = res.ok && type.includes("text/html") ? await readBoundedHtml(res) : { body: "", truncated: false };
+    return { status: res.status, ...html, contentType: type };
+  } catch { return { status: 0, body: "", contentType: "", truncated: false, error: "The website could not be reached within 8 seconds." }; }
 }
 async function aiNote(criteria: Criterion[], findings: Finding[], evidenceNotes: string) {
   if (!cfg.OPENAI_API_KEY) return null;
@@ -122,9 +115,9 @@ export async function POST(request: Request) {
     const title = String(input.title || "").trim().slice(0, 120);
     const description = String(input.description || "").trim().slice(0, 2000);
     const freelancerEmail = String(input.freelancerEmail || "").trim().toLowerCase();
-    const amountCents = Math.round(Number(input.amount) * 100);
+    const amountCents = parseUsdCents(input.amount);
     const criteria = input.criteria;
-    if (!title || !description || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(freelancerEmail) || freelancerEmail === user.email.toLowerCase() || !Number.isSafeInteger(amountCents) || amountCents < 100 || amountCents > 100000000) return fail("Enter a title, scope, a different freelancer email, and an amount from $1 to $1,000,000");
+    if (!title || !description || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(freelancerEmail) || freelancerEmail === user.email.toLowerCase() || amountCents === null) return fail("Enter a title, scope, a different freelancer email, and a USD amount from $1 to $1,000,000 with at most two decimals");
     if (!Array.isArray(criteria) || criteria.length < 1 || criteria.length > 8 || !criteria.every(c => c && typeof c.label === "string" && c.label.trim().length > 2 && c.label.length <= 240 && ["reachable", "contains", "manual"].includes(c.kind) && (c.kind !== "contains" || (typeof c.needle === "string" && c.needle.trim().length > 0 && c.needle.length <= 100)))) return fail("Add 1–8 valid acceptance criteria");
     const id = crypto.randomUUID(), time = now();
     await db().prepare("INSERT INTO projects (id,client_id,client_email,freelancer_email,title,description,amount_cents,currency,criteria_json,status,payment_status,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)")
@@ -140,64 +133,79 @@ export async function POST(request: Request) {
 
   if (action === "accept") {
     if (userRole !== "freelancer" || p.status !== "INVITED") return fail("Only the invited freelancer can accept this agreement", 403);
-    await db().prepare("UPDATE projects SET status='AGREED',updated_at=? WHERE id=? AND status='INVITED'").bind(now(),id).run();
+    const changed = await db().prepare("UPDATE projects SET status='AGREED',updated_at=? WHERE id=? AND status='INVITED'").bind(now(),id).run();
+    if (!changed.meta.changes) return fail("Agreement state changed; refresh and try again", 409);
     await event(id,user.email,"AGREEMENT_ACCEPTED","Freelancer accepted agreement version 1.");
     return json({ ok: true });
   }
 
   if (action === "submit") {
-    if (userRole !== "freelancer" || !["AGREED","REVISION_REQUESTED","REVIEW"].includes(p.status)) return fail("Only the assigned freelancer can submit evidence", 403);
-    const url = safeUrl(input.url);
+    if (userRole !== "freelancer" || !["AGREED","REVISION_REQUESTED"].includes(p.status)) return fail("Only the assigned freelancer can submit evidence after agreement or revision", 403);
+    const url = safeWebsiteUrl(input.url);
     const notes = String(input.notes || "").trim().slice(0, 3000);
     if (!url || !notes) return fail("Provide a public HTTPS website URL and evidence notes");
     const time = now(), hash = await sha256(`${id}|${url}|${notes}|${time}`);
-    await db().prepare("UPDATE projects SET evidence_url=?,evidence_notes=?,evidence_hash=?,evidence_at=?,findings_json=NULL,evaluated_at=NULL,status='SUBMITTED',updated_at=? WHERE id=?")
+    const changed = await db().prepare("UPDATE projects SET evidence_url=?,evidence_notes=?,evidence_hash=?,evidence_at=?,findings_json=NULL,evaluated_at=NULL,latest_run_id=NULL,status='SUBMITTED',updated_at=? WHERE id=? AND status IN ('AGREED','REVISION_REQUESTED')")
       .bind(url,notes,hash,time,time,id).run();
+    if (!changed.meta.changes) return fail("Milestone state changed; refresh and try again", 409);
     await event(id,user.email,"EVIDENCE_SUBMITTED",`Submission SHA-256 ${hash.slice(0,16)}…; website ${url}`);
     return json({ ok: true });
   }
   if (action === "verify") {
-    if (userRole !== "client" || p.status !== "SUBMITTED" || !p.evidence_url) return fail("Submitted evidence is required", 409);
-    const website = await inspectWebsite(p.evidence_url);
-    const criteria = JSON.parse(p.criteria_json) as Criterion[];
-    const findings: Finding[] = criteria.map(c => {
-      if (c.kind === "reachable") return {
-        label: c.label, status: website.status >= 200 && website.status < 300 ? "VERIFIED" : website.status >= 400 ? "FAILED" : "INCONCLUSIVE",
-        explanation: website.status >= 200 && website.status < 300 ? `Website returned HTTP ${website.status}.` : website.status ? `Website returned HTTP ${website.status}.` : "The website could not be reached within 8 seconds.",
-        check: "HTTP availability",
-      };
-      if (c.kind === "contains") return {
-        label: c.label,
-        status: website.body ? (website.body.toLowerCase().includes((c.needle || "").toLowerCase()) ? "VERIFIED" : "FAILED") : "INCONCLUSIVE",
-        explanation: website.body ? (website.body.toLowerCase().includes((c.needle || "").toLowerCase()) ? `Expected text “${c.needle}” was found in the HTML.` : `Expected text “${c.needle}” was not found in the HTML.`) : "HTML was unavailable for this check.",
-        check: "HTML text match",
-      };
-      return { label: c.label, status: "INCONCLUSIVE", explanation: "This criterion needs client review; no automated test was configured.", check: "Manual review" };
-    });
-    const note = await aiNote(criteria, findings, p.evidence_notes || "");
-    const time = now();
-    await db().prepare("UPDATE projects SET findings_json=?,evaluated_at=?,status='REVIEW',updated_at=? WHERE id=? AND status='SUBMITTED'")
-      .bind(JSON.stringify(findings),time,time,id).run();
-    await event(id,user.email,"VERIFICATION_COMPLETED",note || "Objective checks completed. Manual criteria remain inconclusive.");
-    return json({ findings, aiNote: note });
+    if (userRole !== "client" || !p.evidence_url || !p.evidence_hash || !["SUBMITTED","EVALUATING"].includes(p.status)) return fail("Submitted evidence is required", 409);
+    const runId = crypto.randomUUID(), startedAt = now();
+    const staleBefore = new Date(Date.now() - 5 * 60_000).toISOString();
+    const claim = await db().prepare("UPDATE projects SET status='EVALUATING',latest_run_id=?,updated_at=? WHERE id=? AND evidence_hash=? AND (status='SUBMITTED' OR (status='EVALUATING' AND updated_at < ?))")
+      .bind(runId,startedAt,id,p.evidence_hash,staleBefore).run();
+    if (!claim.meta.changes) return fail("Verification is already running or evidence changed", 409);
+    try {
+      await db().prepare("INSERT INTO verification_runs (id,project_id,evidence_hash,checker_version,model,started_at,state) VALUES (?,?,?,?,?,?,?)")
+        .bind(runId,id,p.evidence_hash,CHECKER_VERSION,cfg.OPENAI_API_KEY ? (cfg.OPENAI_MODEL || "gpt-4o-mini") : null,startedAt,"RUNNING").run();
+      const website = await inspectWebsite(p.evidence_url);
+      const criteria = JSON.parse(p.criteria_json) as Criterion[];
+      const findings = evaluateCriteria(criteria, website);
+      const note = await aiNote(criteria, findings, p.evidence_notes || "");
+      const time = now();
+      await db().prepare("UPDATE verification_runs SET state='COMPLETED',completed_at=?,website_status=?,website_body_hash=?,website_truncated=?,findings_json=?,ai_note=? WHERE id=?")
+        .bind(time,website.status,website.body ? await sha256(website.body) : null,website.truncated ? 1 : 0,JSON.stringify(findings),note,runId).run();
+      const complete = await db().prepare("UPDATE projects SET findings_json=?,evaluated_at=?,status='REVIEW',updated_at=? WHERE id=? AND status='EVALUATING' AND latest_run_id=? AND evidence_hash=?")
+        .bind(JSON.stringify(findings),time,time,id,runId,p.evidence_hash).run();
+      if (!complete.meta.changes) {
+        await db().prepare("UPDATE verification_runs SET state='STALE' WHERE id=?").bind(runId).run();
+        return fail("Evidence changed during verification; run it again", 409);
+      }
+      await event(id,user.email,"VERIFICATION_COMPLETED",`Run ${runId}; checker ${CHECKER_VERSION}; ${note || "objective checks complete"}`);
+      return json({ findings, aiNote: note, runId });
+    } catch {
+      await db().prepare("UPDATE verification_runs SET state='FAILED',completed_at=? WHERE id=?").bind(now(),runId).run().catch(() => {});
+      await db().prepare("UPDATE projects SET status='SUBMITTED',updated_at=? WHERE id=? AND status='EVALUATING' AND latest_run_id=?").bind(now(),id,runId).run().catch(() => {});
+      return fail("Verification failed; you can retry safely", 502);
+    }
   }
   if (action === "approve" || action === "revise") {
     if (userRole !== "client" || p.status !== "REVIEW") return fail("Only the client can decide after review", 403);
     const reason = String(input.reason || "").trim().slice(0, 1000);
     if (action === "revise" && reason.length < 5) return fail("Explain the revision needed");
+    const findings = p.findings_json ? JSON.parse(p.findings_json) as Finding[] : [];
+    if (!p.latest_run_id || findings.length === 0) return fail("A completed verification run is required", 409);
+    if (action === "approve" && findings.some(f => f.status !== "VERIFIED") && reason.length < 5) return fail("Explain why you are approving an inconclusive or failed check");
     const status = action === "approve" ? "APPROVED" : "REVISION_REQUESTED";
-    await db().prepare("UPDATE projects SET status=?,decision_reason=?,updated_at=? WHERE id=? AND status='REVIEW'").bind(status,reason || "Client reviewed the evidence and approved.",now(),id).run();
+    const changed = await db().prepare("UPDATE projects SET status=?,decision_reason=?,updated_at=? WHERE id=? AND status='REVIEW'").bind(status,reason || "Client reviewed the evidence and approved.",now(),id).run();
+    if (!changed.meta.changes) return fail("Milestone state changed; refresh and decide again", 409);
     await event(id,user.email,action === "approve" ? "CLIENT_APPROVED" : "REVISION_REQUESTED",reason || "Client reviewed the evidence and approved.");
     return json({ ok: true });
   }
   if (action === "create_order") {
     if (userRole !== "client" || p.status !== "APPROVED") return fail("Client approval is required", 403);
     if (p.payment_status === "COMPLETED") return fail("This milestone is already paid", 409);
+    if (p.payment_status === "FAILED") return fail("This attempt failed; reconcile it before another payment", 409);
     if (p.paypal_order_id) return json({ orderId: p.paypal_order_id });
     try {
       const token = await paypalToken();
       const requestId = p.payment_request_id || `${id}-create`;
-      await db().prepare("UPDATE projects SET payment_request_id=?,payment_status='PENDING',updated_at=? WHERE id=? AND payment_status!='COMPLETED'").bind(requestId,now(),id).run();
+      const reserved = await db().prepare("UPDATE projects SET payment_request_id=?,payment_status='PENDING',updated_at=? WHERE id=? AND status='APPROVED' AND payment_status NOT IN ('COMPLETED','FAILED') AND paypal_order_id IS NULL")
+        .bind(requestId,now(),id).run();
+      if (!reserved.meta.changes) return fail("Payment state changed; refresh before checkout", 409);
       const response = await fetch("https://api-m.sandbox.paypal.com/v2/checkout/orders", {
         method: "POST",
         headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json", "PayPal-Request-Id": requestId },
@@ -205,9 +213,13 @@ export async function POST(request: Request) {
       });
       const data = await response.json() as { id?: string; message?: string };
       if (!response.ok || !data.id) throw new Error(data.message || "PayPal order creation failed");
-      await db().prepare("UPDATE projects SET paypal_order_id=?,updated_at=? WHERE id=? AND paypal_order_id IS NULL").bind(data.id,now(),id).run();
-      await event(id,user.email,"PAYPAL_ORDER_CREATED",`Sandbox order ${data.id}`);
-      return json({ orderId: data.id });
+      const stored = await db().prepare("UPDATE projects SET paypal_order_id=?,updated_at=? WHERE id=? AND paypal_order_id IS NULL AND status='APPROVED'")
+        .bind(data.id,now(),id).run();
+      if (stored.meta.changes) await event(id,user.email,"PAYPAL_ORDER_CREATED",`Sandbox order ${data.id}`);
+      const latest = await project(id);
+      if (!latest?.paypal_order_id) throw new Error("Order was created but could not be recorded; retry with the same idempotency key");
+      if (latest.paypal_order_id !== data.id) throw new Error("PayPal returned a conflicting order ID");
+      return json({ orderId: latest.paypal_order_id });
     } catch (error) { return fail(error instanceof Error ? error.message : "PayPal request failed", 502); }
   }
   if (action === "capture_order") {
@@ -221,11 +233,15 @@ export async function POST(request: Request) {
       const data = await response.json() as { status?: string; purchase_units?: Array<{ payments?: { captures?: Array<{ id: string; status: string; amount?: { value: string; currency_code: string } }> } }> };
       const capture = data.purchase_units?.[0]?.payments?.captures?.[0];
       if (!response.ok || !capture) throw new Error("PayPal did not return a capture");
-      const expected = (p.amount_cents / 100).toFixed(2);
-      if (capture.amount?.value !== expected || capture.amount?.currency_code !== p.currency) throw new Error("PayPal capture amount or currency mismatch");
-      const status = capture.status === "COMPLETED" ? "COMPLETED" : "PENDING";
-      await db().prepare("UPDATE projects SET paypal_capture_id=?,payment_status=?,updated_at=? WHERE id=? AND payment_status!='COMPLETED'")
-        .bind(capture.id,status,now(),id).run();
+      if (!captureMatches(capture,p.amount_cents,p.currency)) throw new Error("PayPal capture amount or currency mismatch");
+      const status = providerPaymentStatus(capture.status);
+      const stored = await db().prepare("UPDATE projects SET paypal_capture_id=?,payment_status=?,updated_at=? WHERE id=? AND paypal_order_id=? AND (paypal_capture_id IS NULL OR paypal_capture_id=?) AND payment_status!='COMPLETED'")
+        .bind(capture.id,status,now(),id,p.paypal_order_id,capture.id).run();
+      if (!stored.meta.changes) {
+        const latest = await project(id);
+        if (latest?.payment_status === "COMPLETED" && latest.paypal_capture_id === capture.id) return json({ status: "COMPLETED", captureId: capture.id });
+        throw new Error("Capture state changed; reconcile before retrying");
+      }
       await event(id,user.email,"PAYPAL_CAPTURE_RESULT",`Sandbox capture ${capture.id}: ${capture.status}`);
       return json({ status, captureId: capture.id });
     } catch (error) { return fail(error instanceof Error ? error.message : "PayPal capture failed", 502); }
@@ -237,9 +253,12 @@ export async function POST(request: Request) {
       const response = await fetch(`https://api-m.sandbox.paypal.com/v2/payments/captures/${encodeURIComponent(p.paypal_capture_id)}`, { headers: { Authorization: `Bearer ${token}` } });
       if (!response.ok) throw new Error("PayPal status lookup failed");
       const capture = await response.json() as { id?: string; status?: string; amount?: { value?: string; currency_code?: string } };
-      if (capture.id !== p.paypal_capture_id || capture.amount?.value !== (p.amount_cents / 100).toFixed(2) || capture.amount?.currency_code !== p.currency) throw new Error("PayPal capture does not match this milestone");
-      const status = capture.status === "COMPLETED" ? "COMPLETED" : capture.status === "DENIED" ? "FAILED" : "PENDING";
-      await db().prepare("UPDATE projects SET payment_status=?,updated_at=? WHERE id=?").bind(status,now(),id).run();
+      if (!captureMatches(capture,p.amount_cents,p.currency,p.paypal_capture_id)) throw new Error("PayPal capture does not match this milestone");
+      const status = providerPaymentStatus(capture.status);
+      if (!canApplyPaymentStatus(p.payment_status,status)) return json({ status: p.payment_status });
+      const changed = await db().prepare("UPDATE projects SET payment_status=?,updated_at=? WHERE id=? AND paypal_capture_id=? AND payment_status=?")
+        .bind(status,now(),id,p.paypal_capture_id,p.payment_status).run();
+      if (!changed.meta.changes) return fail("Payment state changed; refresh and reconcile again", 409);
       await event(id,user.email,"PAYMENT_RECONCILED",`Sandbox capture ${capture.id}: ${capture.status}`);
       return json({ status });
     } catch (error) { return fail(error instanceof Error ? error.message : "Payment reconciliation failed", 502); }

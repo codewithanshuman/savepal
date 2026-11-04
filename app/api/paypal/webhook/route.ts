@@ -1,7 +1,9 @@
 import { env } from "cloudflare:workers";
+import { captureMatches, canApplyPaymentStatus, providerPaymentStatus } from "../../../../lib/assurance";
+import { appendAudit } from "../../../../lib/audit";
 
 export const runtime = "edge";
-const cfg = env as Cloudflare.Env & { PAYPAL_CLIENT_ID?: string; PAYPAL_CLIENT_SECRET?: string; PAYPAL_WEBHOOK_ID?: string };
+const cfg = env as Cloudflare.Env & { PAYPAL_CLIENT_ID?: string; PAYPAL_CLIENT_SECRET?: string; PAYPAL_WEBHOOK_ID?: string; AUDIT_HMAC_KEY?: string };
 
 export async function POST(request: Request) {
   if (!env.DB || !cfg.PAYPAL_CLIENT_ID || !cfg.PAYPAL_CLIENT_SECRET || !cfg.PAYPAL_WEBHOOK_ID) return Response.json({ error: "Webhook is not configured" }, { status: 503 });
@@ -26,15 +28,23 @@ export async function POST(request: Request) {
       body: JSON.stringify({ transmission_id: transmissionId, transmission_time: transmissionTime, cert_url: certUrl, auth_algo: authAlgo, transmission_sig: transmissionSig, webhook_id: cfg.PAYPAL_WEBHOOK_ID, webhook_event: body }),
     });
     if (!verification.ok || ((await verification.json()) as { verification_status: string }).verification_status !== "SUCCESS") return Response.json({ error: "Invalid signature" }, { status: 401 });
-    const match = await env.DB.prepare("SELECT id, payment_status FROM projects WHERE paypal_capture_id = ?").bind(body.resource.id).first<{ id: string; payment_status: string }>();
+    const match = await env.DB.prepare("SELECT id, payment_status, amount_cents, currency FROM projects WHERE paypal_capture_id = ?")
+      .bind(body.resource.id).first<{ id: string; payment_status: string; amount_cents: number; currency: string }>();
     if (!match) return Response.json({ ok: true, ignored: true });
-    const inserted = await env.DB.prepare("INSERT OR IGNORE INTO paypal_events (id, project_id, event_type, received_at) VALUES (?, ?, ?, ?)").bind(body.id,match.id,body.event_type,new Date().toISOString()).run();
-    if (!inserted.meta.changes) return Response.json({ ok: true, duplicate: true });
-    const newStatus: Record<string,string> = { "PAYMENT.CAPTURE.COMPLETED": "COMPLETED", "PAYMENT.CAPTURE.PENDING": "PENDING", "PAYMENT.CAPTURE.DENIED": "FAILED" };
-    const status = newStatus[body.event_type];
-    if (status && match.payment_status !== "COMPLETED") {
-      await env.DB.prepare("UPDATE projects SET payment_status=?,updated_at=? WHERE id=?").bind(status,new Date().toISOString(),match.id).run();
-      await env.DB.prepare("INSERT INTO audit_events (project_id, actor, type, detail, created_at) VALUES (?, ?, ?, ?, ?)").bind(match.id,"PayPal",body.event_type,`Verified sandbox event ${body.id}`,new Date().toISOString()).run();
+    if (!["PAYMENT.CAPTURE.COMPLETED","PAYMENT.CAPTURE.PENDING","PAYMENT.CAPTURE.DENIED"].includes(body.event_type)) return Response.json({ ok: true, ignored: true });
+    const captureResponse = await fetch(`https://api-m.sandbox.paypal.com/v2/payments/captures/${encodeURIComponent(body.resource.id)}`, { headers: { Authorization: `Bearer ${token}` } });
+    if (!captureResponse.ok) throw new Error("Capture lookup failed");
+    const capture = await captureResponse.json() as { id?: string; status?: string; amount?: { value?: string; currency_code?: string } };
+    if (!captureMatches(capture,match.amount_cents,match.currency,body.resource.id)) return Response.json({ error: "Capture does not match milestone" }, { status: 409 });
+    const status = providerPaymentStatus(capture.status);
+    if (body.event_type === "PAYMENT.CAPTURE.COMPLETED" && status !== "COMPLETED") throw new Error("Provider has not confirmed completion yet");
+    await env.DB.prepare("INSERT OR IGNORE INTO paypal_events (id, project_id, event_type, received_at) VALUES (?, ?, ?, ?)")
+      .bind(body.id,match.id,body.event_type,new Date().toISOString()).run();
+    if (canApplyPaymentStatus(match.payment_status,status) && match.payment_status !== status) {
+      const changed = await env.DB.prepare("UPDATE projects SET payment_status=?,updated_at=? WHERE id=? AND paypal_capture_id=? AND payment_status=?")
+        .bind(status,new Date().toISOString(),match.id,body.resource.id,match.payment_status).run();
+      if (!changed.meta.changes) throw new Error("Concurrent payment update");
+      await appendAudit(env.DB,match.id,"PayPal",body.event_type,`Signature and capture verified for sandbox event ${body.id}; provider status ${capture.status}`,cfg.AUDIT_HMAC_KEY);
     }
     return Response.json({ ok: true });
   } catch {
