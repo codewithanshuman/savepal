@@ -45,8 +45,26 @@ test("maps exact evidence to findings and keeps unsupported checks inconclusive"
   assert.deepEqual(findings.map(f => f.status),["VERIFIED","VERIFIED","INCONCLUSIVE"]);
   assert.equal(findings[1].evidenceRefs[0].url,"https://shop.example.org/products");
   assert.ok(findings[2].signals.some(s => s.includes("form")));
-  assert.deepEqual(evaluateSnapshot(criteria,snapshot,live.map(page => ({ ...page, body: page.body.replace("Products","Goods") }))).map(f => f.status),["INCONCLUSIVE","VERIFIED","INCONCLUSIVE"]);
+  assert.deepEqual(evaluateSnapshot(criteria,snapshot,live.map(page => ({ ...page, body: page.body.replace("Products","Goods") }))).map(f => f.status),["VERIFIED","VERIFIED","INCONCLUSIVE"]);
   assert.equal(evaluateSnapshot(criteria,snapshot,live.map(page => page.url.endsWith("/products") ? { ...page, body: page.body.replace("Blue shirt","Red shirt") } : page))[1].status,"INCONCLUSIVE");
+  assert.ok(findings[1].evidenceRefs[0].excerpt.includes("blue shirt"));
+});
+
+test("visible whole-phrase matching excludes hidden text and substrings", async () => {
+  const html = '<html><body><p hidden>Blue shirt</p><p aria-hidden="true">Blue shirt</p><p style="display:none">Blue shirt</p><p>Blue shirts</p></body></html>';
+  const snapshot = await captureWebsite("https://shop.example.org/",async () => new Response(html,{headers:{"content-type":"text/html"}}));
+  const livePage = [{url:snapshot.rootUrl,status:200,body:html}];
+  assert.equal(extractedText(html),"Blue shirts");
+  assert.equal(evaluateSnapshot([{label:"Exact product phrase",kind:"contains",needle:"Blue shirt"}],snapshot,livePage)[0].status,"FAILED");
+  assert.equal(evaluateSnapshot([{label:"Exact product phrase",kind:"contains",needle:"Blue shirts"}],snapshot,livePage)[0].status,"VERIFIED");
+});
+
+test("crawl prioritizes links related to locked criteria", async () => {
+  const html = '<html><body>' + ["about","blog","careers","contact","faq","legal","team"].map(name => `<a href="/${name}">${name}</a>`).join("") + '</body></html>';
+  const snapshot = await captureWebsite("https://shop.example.org/",async url => new Response(url.endsWith("/") ? html : '<p>Support email</p>',{headers:{"content-type":"text/html"}}),[{label:"Contact page has support email",kind:"contains",needle:"Support email"}]);
+  assert.equal(snapshot.coverageLimited,true);
+  assert.ok(snapshot.pages.some(page => page.url.endsWith("/contact")));
+  assert.equal(snapshot.pages.length,6);
 });
 
 test("extracted text ignores scripts and missing text is inconclusive when crawl is limited", async () => {

@@ -1,4 +1,5 @@
 import { MAX_HTML_BYTES, readBoundedHtml, type Criterion, type Finding } from "./assurance.ts";
+import { internalLinks, normalizedWords, phraseEvidence, visibleText, type InternalLink } from "./html-evidence.ts";
 
 export const SNAPSHOT_VERSION = "website-snapshot-v1";
 export const MAX_PAGES = 6;
@@ -35,7 +36,7 @@ export type SnapshotManifest = {
   coverageLimited: boolean;
 };
 export type AdvancedFinding = Finding & {
-  evidenceRefs: Array<{ url: string; bodyHash: string | null }>;
+  evidenceRefs: Array<{ url: string; bodyHash: string | null; excerpt?: string }>;
   signals: string[];
   requiresHumanReview: boolean;
   coverage: "FULL" | "PARTIAL";
@@ -47,37 +48,8 @@ export async function sha256(value: string): Promise<string> {
   return Array.from(new Uint8Array(raw), b => b.toString(16).padStart(2, "0")).join("");
 }
 
-function decodeEntities(value: string): string {
-  return value.replace(/&(?:amp|lt|gt|quot|apos|nbsp|#39|#x27);/gi, entity => {
-    const key = entity.toLowerCase();
-    return key === "&amp;" ? "&" : key === "&lt;" ? "<" : key === "&gt;" ? ">" :
-      key === "&quot;" ? '"' : key === "&nbsp;" ? " " : "'";
-  });
-}
-
 export function extractedText(html: string): string {
-  return decodeEntities(html
-    .replace(/<!--[\s\S]*?-->/g, " ")
-    .replace(/<(script|style|template|svg|noscript)\b[^>]*>[\s\S]*?<\/\1\s*>/gi, " ")
-    .replace(/<[^>]+>/g, " ")
-  ).replace(/\s+/g, " ").trim();
-}
-
-function anchorLinks(html: string, base: string, origin: string): string[] {
-  const found = new Set<string>();
-  const pattern = /<a\b[^>]*\bhref\s*=\s*(["'])(.*?)\1/gi;
-  let match: RegExpExecArray | null;
-  while ((match = pattern.exec(html))) {
-    try {
-      const url = new URL(decodeEntities(match[2]), base);
-      if (url.origin !== origin || url.search || /\/(?:logout|signout|delete|admin|account)(?:\/|$)/i.test(url.pathname)) continue;
-      if (/\.(?:pdf|zip|jpg|jpeg|png|gif|svg|webp|mp4|js|css)$/i.test(url.pathname)) continue;
-      url.hash = "";
-      found.add(url.toString());
-      if (found.size >= 100) break;
-    } catch { /* Ignore malformed links from untrusted HTML. */ }
-  }
-  return [...found];
+  return visibleText(html);
 }
 
 function pageSignals(html: string) {
@@ -105,7 +77,7 @@ async function capturePage(url: string, origin: string, fetcher: typeof fetch): 
     return {
       url, status: response.status, contentType, body,
       bodyHash: body ? await sha256(body) : null, truncated, error: null,
-      ...signals, links: body ? anchorLinks(body,url,origin) : [],
+      ...signals, links: body ? internalLinks(body,url,origin).map(link => link.url) : [],
     };
   } catch {
     return {
@@ -116,15 +88,19 @@ async function capturePage(url: string, origin: string, fetcher: typeof fetch): 
   }
 }
 
-function linkPriority(url: string) {
-  return /\/(product|shop|catalog|checkout|cart|store)/i.test(url) ? 0 : 1;
+function linkPriority(link: InternalLink, criteria: Criterion[]) {
+  const terms = new Set(normalizedWords(`${link.text} ${new URL(link.url).pathname}`).split(" ").filter(term => term.length >= 4).map(term => term.replace(/s$/, "")));
+  const requirementTerms = new Set(criteria.flatMap(c => normalizedWords(`${c.label} ${c.needle || ""}`).split(" ")).filter(term => term.length >= 4).map(term => term.replace(/s$/, "")));
+  const overlap = [...terms].filter(term => requirementTerms.has(term)).length;
+  return overlap * 10 + (/\/(product|shop|catalog|checkout|cart|store)/i.test(link.url) ? 2 : 0);
 }
 
-export async function captureWebsite(rootUrl: string, fetcher: typeof fetch = fetch): Promise<WebsiteSnapshot> {
+export async function captureWebsite(rootUrl: string, fetcher: typeof fetch = fetch, criteria: Criterion[] = []): Promise<WebsiteSnapshot> {
   const root = new URL(rootUrl);
   const first = await capturePage(rootUrl,root.origin,fetcher);
-  const links = first.links.filter(url => url !== rootUrl).sort((a,b) => linkPriority(a)-linkPriority(b) || a.localeCompare(b));
-  const selected = links.slice(0, MAX_PAGES - 1);
+  const links = first.body ? internalLinks(first.body,rootUrl,root.origin).filter(link => link.url !== rootUrl) : [];
+  links.sort((a,b) => linkPriority(b,criteria)-linkPriority(a,criteria) || a.url.localeCompare(b.url));
+  const selected = links.slice(0, MAX_PAGES - 1).map(link => link.url);
   const others = await Promise.all(selected.map(url => capturePage(url,root.origin,fetcher)));
   const pages = [first,...others];
   return {
@@ -160,44 +136,45 @@ export async function validateSnapshot(raw: string, expectedHash: string, expect
 export function evaluateSnapshot(criteria: Criterion[], snapshot: WebsiteSnapshot, livePages: LivePage[]): AdvancedFinding[] {
   const root = snapshot.pages[0];
   const liveByUrl = new Map(livePages.map(page => [page.url,page]));
-  const stable = (page: SnapshotPage) => {
+  const submittedText = new Map(snapshot.pages.map(page => [page.url,extractedText(page.body)]));
+  const currentText = new Map(livePages.map(page => [page.url,extractedText(page.body)]));
+  const liveSuccess = (page: SnapshotPage) => {
     const live = liveByUrl.get(page.url);
-    return !!live?.body && live.status >= 200 && live.status < 300 &&
-      extractedText(live.body) === extractedText(page.body);
+    return !!live && live.status >= 200 && live.status < 300 && !!live.body;
   };
-  const rootStable = !!root && stable(root);
   return criteria.map(c => {
     if (c.kind === "reachable") {
-      const passed = root.status >= 200 && root.status < 300;
-      const failed = root.status >= 400 && root.status < 500;
-      const status = rootStable ? passed ? "VERIFIED" : failed ? "FAILED" : "INCONCLUSIVE" : "INCONCLUSIVE";
+      const live = liveByUrl.get(root.url);
+      const passed = root.status >= 200 && root.status < 300 && !!live && live.status >= 200 && live.status < 300;
+      const failed = root.status >= 400 && root.status < 500 && !!live && live.status >= 400 && live.status < 500;
+      const status = passed ? "VERIFIED" : failed ? "FAILED" : "INCONCLUSIVE";
       return {
         label: c.label, status, check: "Snapshot and live HTTP availability",
-        explanation: !rootStable ? "The live root page differs from the submitted snapshot or could not be confirmed." :
-          `The submitted root returned HTTP ${root.status}; its extracted text still matches the live page.`,
+        explanation: passed ? `The root returned HTTP ${root.status} at submission and HTTP ${live.status} on verification.` :
+          failed ? `The root returned HTTP ${root.status} at submission and HTTP ${live.status} on verification.` :
+          "The submitted and live availability checks disagree or one could not be completed.",
         evidenceRefs: [{ url: root.url, bodyHash: root.bodyHash }],
-        signals: [`Captured HTTP ${root.status}`,`Live text ${rootStable ? "matched" : "mismatch or unavailable"}`],
+        signals: [`Captured HTTP ${root.status}`,`Live HTTP ${live?.status ?? 0}`],
         requiresHumanReview: status !== "VERIFIED", coverage: "FULL",
       };
     }
     if (c.kind === "contains") {
-      const needle = (c.needle || "").toLocaleLowerCase();
-      const matches = snapshot.pages.filter(p => p.body && extractedText(p.body).toLocaleLowerCase().includes(needle));
-      const complete = !snapshot.coverageLimited && snapshot.pages.every(p => p.status >= 200 && p.status < 300 && !p.truncated);
-      const confirmed = matches.filter(stable);
-      const allStable = snapshot.pages.every(stable);
-      const status = confirmed.length ? "VERIFIED" : complete && allStable ? "FAILED" : "INCONCLUSIVE";
+      const needle = c.needle || "";
+      const matches = snapshot.pages.map(page => ({ page, excerpt: phraseEvidence(submittedText.get(page.url) || "",needle) }))
+        .filter((match): match is { page: SnapshotPage; excerpt: string } => !!match.excerpt);
+      const confirmed = matches.filter(({page}) => liveSuccess(page) && !!phraseEvidence(currentText.get(page.url) || "",needle));
+      const complete = !snapshot.coverageLimited && snapshot.pages.every(page => page.status >= 200 && page.status < 300 && !page.truncated && liveSuccess(page));
+      const status = confirmed.length ? "VERIFIED" : !matches.length && complete ? "FAILED" : "INCONCLUSIVE";
       return {
-        label: c.label, status, check: "Extracted HTML text across captured internal pages",
-        explanation: confirmed.length ? `The expected text appears in ${confirmed.length} captured page${confirmed.length === 1 ? "" : "s"} and still matches live text.` :
-          matches.length ? "The matching page changed or could not be confirmed live." :
-          !allStable ? "Captured pages changed or could not be confirmed live." :
-          complete ? "The expected text was absent from all discovered internal pages." :
-          "The expected text was not found, but crawl coverage is incomplete.",
-        evidenceRefs: matches.length ? matches.map(p => ({ url:p.url,bodyHash:p.bodyHash })) :
+        label: c.label, status, check: "Whole-phrase visible text in submitted and live pages",
+        explanation: confirmed.length ? `The whole phrase appears in ${confirmed.length} submitted page${confirmed.length === 1 ? "" : "s"} and remains present on the same live page.` :
+          matches.length ? "The submitted page contained the phrase, but it is missing or could not be confirmed on that live page." :
+          complete ? "The phrase was absent from all captured, live-confirmed internal pages." :
+          "The phrase was not found, but page availability or crawl coverage is incomplete.",
+        evidenceRefs: matches.length ? matches.map(({page,excerpt}) => ({ url:page.url,bodyHash:page.bodyHash,excerpt })) :
           snapshot.pages.map(p => ({ url:p.url,bodyHash:p.bodyHash })),
-        signals: [`${snapshot.pages.length} page(s) captured`,`${confirmed.length} live-confirmed match(es)`,`Coverage ${complete && allStable ? "complete" : "partial"}`],
-        requiresHumanReview: status !== "VERIFIED", coverage: complete && allStable ? "FULL" : "PARTIAL",
+        signals: [`${snapshot.pages.length} page(s) captured`,`${confirmed.length} live-confirmed whole-phrase match(es)`,`Discovered-page coverage ${complete ? "complete" : "partial"}`],
+        requiresHumanReview: status !== "VERIFIED", coverage: complete ? "FULL" : "PARTIAL",
       };
     }
     const signals = [

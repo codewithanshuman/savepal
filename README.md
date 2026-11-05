@@ -7,12 +7,12 @@ SavePal links a locked website milestone, evidence, objective verification, a cl
 - ChatGPT sign-in and server-side client/freelancer access checks
 - Client-created milestones with locked scope, USD amount, and 1–8 criteria
 - Freelancer acceptance and HTTPS evidence submission with a private, time-stamped website snapshot
-- Up to six bounded, same-origin pages per submission, each with a SHA-256 hash and structural signals
+- Up to six bounded, same-origin pages per submission, selected with the locked criteria in mind, each with a SHA-256 hash and structural signals
 - Immutable submission records and an inspectable snapshot manifest; the raw snapshot is available to agreement members at `GET /api/evidence?projectId=...&submissionId=...`
-- Verification rechecks every captured page live and ties each finding to the exact page hashes. Changed or unavailable pages produce an inconclusive result instead of an unsupported pass.
+- Verification rechecks every captured page live and ties each finding to page hashes and a normalized text excerpt. Whole-phrase matches use visible HTML text and exclude scripts, hidden elements, and substring lookalikes. Unrelated page changes do not invalidate a supported phrase; removed or unavailable evidence becomes inconclusive.
 - Versioned verification runs bound to the exact submission and snapshot hashes, with crash recovery after five minutes
 - Append-only, per-agreement audit hash chains; optional HMAC key protects against database-only tampering
-- Optional structured OpenAI report summary; model text cannot change check results or authorize payment
+- Optional structured OpenAI review of each criterion, with page IDs and quotes validated against submitted and live evidence. The model's assessments are advisory and cannot change objective results or authorize payment; input, output, model, and response hashes are retained with the run.
 - Client approval or revision request
 - PayPal sandbox order creation, buyer approval, capture, amount validation, stable idempotency keys, and verified webhook ingestion
 - Durable D1 storage
@@ -39,7 +39,7 @@ Open the printed local URL, then visit `/signin-with-chatgpt?return_to=/` for th
 
 Set `PAYPAL_CLIENT_ID` (browser-safe), `PAYPAL_CLIENT_SECRET` (secret), and `PAYPAL_WEBHOOK_ID` (secret) in Sites runtime environment variables. Use a PayPal **sandbox** REST app. Register `https://YOUR-SITE/api/paypal/webhook` for capture completed, pending, and denied events. The app never calls PayPal live endpoints.
 
-`OPENAI_API_KEY` is optional and must be a secret. `OPENAI_MODEL` defaults to `gpt-4o-mini`. Without the key, objective verification still works and the report labels manual checks inconclusive.
+`OPENAI_API_KEY` is optional and must be a secret. `OPENAI_MODEL` defaults to `gpt-4o-mini`. When configured, bounded website text and freelancer notes are sent to the OpenAI Responses API for criterion-by-criterion review. Without the key, objective verification still works and manual checks remain inconclusive. AI review failure also leaves objective results intact.
 
 `AUDIT_HMAC_KEY` should be a random, persistent 32-byte-or-longer secret. Keep it stable across deployments; changing it invalidates verification of earlier audit hashes. The hosted Site uses a generated secret. Local development without one uses a plain SHA-256 chain, which detects accidental edits but is weaker against someone with database write access.
 
@@ -57,7 +57,7 @@ The new hosted Site is private by default. The invited freelancer must be allowe
 
 ## Scope and limits
 
-This hackathon MVP focuses on one website milestone per agreement. Snapshot checks read up to six pages of server-returned HTML, bounded at 100 KB per page. They do not execute browser JavaScript, simulate a mobile device, or prove a checkout flow. Structural signals such as forms and viewport metadata only guide human review; manual checks stay inconclusive. A site with more than six discovered pages has partial coverage, so missing text is inconclusive. Evidence is a private website snapshot plus notes, not uploaded files. Payment uses immediate sandbox capture after buyer approval, not escrow or a long-lived authorization hold. The app has no production payment mode.
+This hackathon MVP focuses on one website milestone per agreement. Snapshot checks read up to six pages of server-returned HTML, bounded at 100 KB per page. They do not execute browser JavaScript, apply external CSS to determine visibility, simulate a mobile device, or prove a checkout flow. Structural signals and AI assessments guide human review; manual checks stay inconclusive. A site with more than six discovered pages has partial coverage, so missing text is inconclusive. Evidence is a private website snapshot plus notes, not uploaded files. Payment uses immediate sandbox capture after buyer approval, not escrow or a long-lived authorization hold. The app has no production payment mode.
 
 PayPal credentials and a separate sandbox buyer account are required for an end-to-end transaction test. Do not describe payment or AI integration as verified until that test is run.
 
