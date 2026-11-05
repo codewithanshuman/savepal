@@ -22,6 +22,13 @@
       "when": 1793810461452,
       "tag": "0002_clammy_baron_strucker",
       "breakpoints": true
+    },
+    {
+      "idx": 3,
+      "version": "6",
+      "when": 1793850763887,
+      "tag": "0003_late_bloodscream",
+      "breakpoints": true
     }
   ]
 }

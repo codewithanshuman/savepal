@@ -15,6 +15,7 @@ export const projects = sqliteTable("projects", {
   evidenceNotes: text("evidence_notes"),
   evidenceHash: text("evidence_hash"),
   evidenceAt: text("evidence_at"),
+  currentSubmissionId: text("current_submission_id"),
   findingsJson: text("findings_json"),
   evaluatedAt: text("evaluated_at"),
   decisionReason: text("decision_reason"),
@@ -60,4 +61,20 @@ export const verificationRuns = sqliteTable("verification_runs", {
   websiteTruncated: integer("website_truncated"),
   findingsJson: text("findings_json"),
   aiNote: text("ai_note"),
+  submissionId: text("submission_id"),
+  snapshotHash: text("snapshot_hash"),
+  coverageJson: text("coverage_json"),
+});
+
+export const evidenceSubmissions = sqliteTable("evidence_submissions", {
+  id: text("id").primaryKey(),
+  projectId: text("project_id").notNull(),
+  submittedBy: text("submitted_by").notNull(),
+  url: text("url").notNull(),
+  notes: text("notes").notNull(),
+  submissionHash: text("submission_hash").notNull(),
+  snapshotHash: text("snapshot_hash").notNull(),
+  snapshotKey: text("snapshot_key").notNull().unique(),
+  manifestJson: text("manifest_json").notNull(),
+  createdAt: text("created_at").notNull(),
 });

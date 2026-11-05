@@ -1,4 +1,4 @@
-export const CHECKER_VERSION = "website-v2";
+export const CHECKER_VERSION = "website-v3";
 export const MAX_HTML_BYTES = 100_000;
 
 export type Criterion = { label: string; kind: "reachable" | "contains" | "manual"; needle?: string };

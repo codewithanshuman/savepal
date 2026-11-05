@@ -23,6 +23,7 @@ $body = @{ action = 'verify'; id = $created.id } | ConvertTo-Json
 $result = Invoke-RestMethod -Uri "$base/api/workspace" -Method Post -WebSession $session -ContentType 'application/json' -Body $body
 $detail = Invoke-RestMethod -Uri "$base/api/workspace?id=$($created.id)" -WebSession $session
 if ($detail.project.status -ne 'REVIEW' -or $detail.project.latest_run_id -ne $result.runId) { throw 'Verification state mismatch' }
-if (-not $detail.auditIntegrity.valid -or $detail.auditIntegrity.checked -ne 2) { throw 'Audit chain failed after verification' }
+if (-not $detail.auditIntegrity.valid -or $detail.auditIntegrity.checked -ne 3) { throw 'Audit chain failed after verification' }
+if (-not $result.snapshotHash -or -not $detail.project.current_submission_id -or $detail.verificationRun.submission_id -ne $detail.project.current_submission_id) { throw 'Verification was not bound to a snapshot' }
 if ($result.findings.Count -ne 3 -or $result.findings[2].status -ne 'INCONCLUSIVE') { throw 'Findings are incorrect' }
 Write-Output "PASS verification_run=$($result.runId) status=$($detail.project.status) findings=$($result.findings.Count) audit_checked=$($detail.auditIntegrity.checked)"

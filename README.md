@@ -6,10 +6,11 @@ SavePal links a locked website milestone, evidence, objective verification, a cl
 
 - ChatGPT sign-in and server-side client/freelancer access checks
 - Client-created milestones with locked scope, USD amount, and 1–8 criteria
-- Freelancer acceptance and HTTPS evidence submission
-- SHA-256 submission fingerprint and time-stamped audit events
-- Bounded HTTP reachability and HTML text checks, with explicit manual/inconclusive findings
-- Versioned verification runs bound to the exact evidence hash, with crash recovery after five minutes
+- Freelancer acceptance and HTTPS evidence submission with a private, time-stamped website snapshot
+- Up to six bounded, same-origin pages per submission, each with a SHA-256 hash and structural signals
+- Immutable submission records and an inspectable snapshot manifest; the raw snapshot is available to agreement members at `GET /api/evidence?projectId=...&submissionId=...`
+- Verification rechecks every captured page live and ties each finding to the exact page hashes. Changed or unavailable pages produce an inconclusive result instead of an unsupported pass.
+- Versioned verification runs bound to the exact submission and snapshot hashes, with crash recovery after five minutes
 - Append-only, per-agreement audit hash chains; optional HMAC key protects against database-only tampering
 - Optional structured OpenAI report summary; model text cannot change check results or authorize payment
 - Client approval or revision request
@@ -28,6 +29,7 @@ npm run build
 node --import ./scripts/sites-env.mjs ./node_modules/wrangler/bin/wrangler.js d1 execute DB --local --config dist/server/wrangler.json --persist-to .wrangler/state --file drizzle/0000_handy_shinobi_shaw.sql
 node --import ./scripts/sites-env.mjs ./node_modules/wrangler/bin/wrangler.js d1 execute DB --local --config dist/server/wrangler.json --persist-to .wrangler/state --file drizzle/0001_sharp_valeria_richards.sql
 node --import ./scripts/sites-env.mjs ./node_modules/wrangler/bin/wrangler.js d1 execute DB --local --config dist/server/wrangler.json --persist-to .wrangler/state --file drizzle/0002_clammy_baron_strucker.sql
+node --import ./scripts/sites-env.mjs ./node_modules/wrangler/bin/wrangler.js d1 execute DB --local --config dist/server/wrangler.json --persist-to .wrangler/state --file drizzle/0003_late_bloodscream.sql
 npm run dev -- --port 5174
 ```
 
@@ -41,6 +43,8 @@ Set `PAYPAL_CLIENT_ID` (browser-safe), `PAYPAL_CLIENT_SECRET` (secret), and `PAY
 
 `AUDIT_HMAC_KEY` should be a random, persistent 32-byte-or-longer secret. Keep it stable across deployments; changing it invalidates verification of earlier audit hashes. The hosted Site uses a generated secret. Local development without one uses a plain SHA-256 chain, which detects accidental edits but is weaker against someone with database write access.
 
+The `BUCKET` R2 binding holds private JSON evidence snapshots. Keep this bucket private. The database stores page hashes and metadata; snapshot bodies are never served without agreement membership checks.
+
 The new hosted Site is private by default. The invited freelancer must be allowed to visit the Site and sign in with the email specified in the agreement. Site access and agreement membership are separate controls.
 
 ## Demo flow
@@ -53,10 +57,10 @@ The new hosted Site is private by default. The invited freelancer must be allowe
 
 ## Scope and limits
 
-This hackathon MVP focuses on one website milestone per agreement. The HTML text check reads server-returned markup; it does not execute browser JavaScript or prove a checkout flow. Manual checks stay inconclusive. Evidence is a URL and notes, not uploaded files. Payment uses immediate sandbox capture after buyer approval, not escrow or a long-lived authorization hold. The app has no production payment mode.
+This hackathon MVP focuses on one website milestone per agreement. Snapshot checks read up to six pages of server-returned HTML, bounded at 100 KB per page. They do not execute browser JavaScript, simulate a mobile device, or prove a checkout flow. Structural signals such as forms and viewport metadata only guide human review; manual checks stay inconclusive. A site with more than six discovered pages has partial coverage, so missing text is inconclusive. Evidence is a private website snapshot plus notes, not uploaded files. Payment uses immediate sandbox capture after buyer approval, not escrow or a long-lived authorization hold. The app has no production payment mode.
 
 PayPal credentials and a separate sandbox buyer account are required for an end-to-end transaction test. Do not describe payment or AI integration as verified until that test is run.
 
-Run `npm test` for deterministic domain checks. With the local preview running on port 5174 and migrations applied, run `tests/api-smoke.ps1`, `tests/verification-smoke.ps1`, and `tests/payment-smoke.ps1` from PowerShell for synthetic agreement creation, permission rejection, verification-run persistence, audit integrity, and missing-credentials payment checks. These scripts write test data only to local D1. No real sandbox capture has been tested without credentials.
+Run `npm test` for deterministic domain checks. With the local preview running on port 5174 and migrations applied, run `tests/api-smoke.ps1`, `tests/evidence-smoke.ps1`, `tests/verification-smoke.ps1`, and `tests/payment-smoke.ps1` from PowerShell for synthetic agreement creation, permission rejection, a real snapshot submission, verification-run persistence, snapshot binding, audit integrity, and missing-credentials payment checks. These scripts write test data only to local D1 and R2. No real sandbox capture has been tested without credentials.
 
 The PayPal checkout currently settles to the sandbox merchant account that owns the configured REST app. Paying a different freelancer account requires PayPal partner/multiparty onboarding and seller permission; that routing is outside this MVP. Never present a merchant capture as proof the freelancer received funds.

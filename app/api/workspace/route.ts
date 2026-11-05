@@ -1,7 +1,8 @@
 import { env } from "cloudflare:workers";
 import { getChatGPTUser } from "../../chatgpt-auth";
-import { CHECKER_VERSION, captureMatches, canApplyPaymentStatus, evaluateCriteria, parseUsdCents, providerPaymentStatus, readBoundedHtml, safeWebsiteUrl, type Criterion, type Finding, type WebsiteResult } from "../../../lib/assurance";
+import { CHECKER_VERSION, captureMatches, canApplyPaymentStatus, parseUsdCents, providerPaymentStatus, readBoundedHtml, safeWebsiteUrl, type Criterion, type Finding, type WebsiteResult } from "../../../lib/assurance";
 import { appendAudit, verifyAudit } from "../../../lib/audit";
+import { captureWebsite, evaluateSnapshot, sha256, snapshotManifest, validateSnapshot } from "../../../lib/website-evidence";
 
 export const runtime = "edge";
 
@@ -13,8 +14,9 @@ type Project = {
   findings_json: string | null; evaluated_at: string | null; decision_reason: string | null;
   paypal_order_id: string | null; paypal_capture_id: string | null;
   payment_status: string; payment_request_id: string | null;
-  created_at: string; updated_at: string; latest_run_id: string | null;
+  created_at: string; updated_at: string; latest_run_id: string | null; current_submission_id: string | null;
 };
+type EvidenceSubmission = { id: string; project_id: string; submission_hash: string; snapshot_hash: string; snapshot_key: string; manifest_json: string; created_at: string };
 
 const db = () => {
   if (!env.DB) throw new Error("Database is unavailable");
@@ -57,17 +59,15 @@ export async function GET(request: Request) {
     if (!p || !role(p, user)) return fail("Agreement not found", 404);
     const audit = await db().prepare("SELECT actor, type, detail, created_at FROM audit_events WHERE project_id = ? ORDER BY id DESC").bind(id).all();
     const auditIntegrity = await verifyAudit(db(),id,cfg.AUDIT_HMAC_KEY);
-    return json({ project: view(p, user), audit: audit.results, auditIntegrity });
+    const submissions = await db().prepare("SELECT id,submission_hash,snapshot_hash,manifest_json,created_at FROM evidence_submissions WHERE project_id=? ORDER BY created_at DESC LIMIT 20").bind(id).all<Pick<EvidenceSubmission,"id"|"submission_hash"|"snapshot_hash"|"manifest_json"|"created_at">>();
+    const verificationRun = p.latest_run_id ? await db().prepare("SELECT id,submission_id,snapshot_hash,checker_version,model,started_at,completed_at,state,website_status,website_body_hash,website_truncated,findings_json,ai_note,coverage_json FROM verification_runs WHERE id=? AND project_id=?").bind(p.latest_run_id,id).first() : null;
+    return json({ project: view(p, user), audit: audit.results, auditIntegrity, evidenceHistory: submissions.results.map(s => ({ ...s, manifest: JSON.parse(s.manifest_json), manifest_json: undefined })), verificationRun });
   }
   const rows = await db().prepare("SELECT * FROM projects WHERE client_id = ? OR lower(freelancer_email) = ? ORDER BY created_at DESC")
     .bind(user.userId, user.email.toLowerCase()).all<Project>();
   return json({ user: { name: user.displayName, email: user.email }, projects: rows.results.map(p => view(p, user)), paypalReady: !!(cfg.PAYPAL_CLIENT_ID && cfg.PAYPAL_CLIENT_SECRET), paypalClientId: cfg.PAYPAL_CLIENT_ID || null, aiReady: !!cfg.OPENAI_API_KEY });
 }
 
-async function sha256(value: string) {
-  const bytes = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(value));
-  return Array.from(new Uint8Array(bytes), b => b.toString(16).padStart(2, "0")).join("");
-}
 async function inspectWebsite(url: string): Promise<WebsiteResult> {
   try {
     const res = await fetch(url, { redirect: "manual", signal: AbortSignal.timeout(8000), headers: { Accept: "text/html" } });
@@ -75,6 +75,15 @@ async function inspectWebsite(url: string): Promise<WebsiteResult> {
     const html = res.ok && type.includes("text/html") ? await readBoundedHtml(res) : { body: "", truncated: false };
     return { status: res.status, ...html, contentType: type };
   } catch { return { status: 0, body: "", contentType: "", truncated: false, error: "The website could not be reached within 8 seconds." }; }
+}
+async function storeSnapshot(projectId: string, submissionId: string, url: string) {
+  if (!env.BUCKET) throw new Error("Private evidence storage is unavailable");
+  const snapshot = await captureWebsite(url);
+  const raw = JSON.stringify(snapshot);
+  const snapshotHash = await sha256(raw);
+  const key = `evidence/${projectId}/${submissionId}.json`;
+  await env.BUCKET.put(key,raw,{ httpMetadata: { contentType: "application/json" } });
+  return { snapshot, snapshotHash, key };
 }
 async function aiNote(criteria: Criterion[], findings: Finding[], evidenceNotes: string) {
   if (!cfg.OPENAI_API_KEY) return null;
@@ -126,7 +135,7 @@ export async function POST(request: Request) {
     return json({ id }, 201);
   }
   const id = String(input.id || "");
-  const p = await project(id);
+  let p = await project(id);
   if (!p) return fail("Agreement not found", 404);
   const userRole = role(p, user);
   if (!userRole) return fail("Access denied", 403);
@@ -144,42 +153,97 @@ export async function POST(request: Request) {
     const url = safeWebsiteUrl(input.url);
     const notes = String(input.notes || "").trim().slice(0, 3000);
     if (!url || !notes) return fail("Provide a public HTTPS website URL and evidence notes");
-    const time = now(), hash = await sha256(`${id}|${url}|${notes}|${time}`);
-    const changed = await db().prepare("UPDATE projects SET evidence_url=?,evidence_notes=?,evidence_hash=?,evidence_at=?,findings_json=NULL,evaluated_at=NULL,latest_run_id=NULL,status='SUBMITTED',updated_at=? WHERE id=? AND status IN ('AGREED','REVISION_REQUESTED')")
-      .bind(url,notes,hash,time,time,id).run();
-    if (!changed.meta.changes) return fail("Milestone state changed; refresh and try again", 409);
-    await event(id,user.email,"EVIDENCE_SUBMITTED",`Submission SHA-256 ${hash.slice(0,16)}…; website ${url}`);
-    return json({ ok: true });
+    if (!env.BUCKET) return fail("Private evidence storage is unavailable", 503);
+    const submissionId = crypto.randomUUID(), time = now();
+    let storedSnapshot: Awaited<ReturnType<typeof storeSnapshot>>;
+    try { storedSnapshot = await storeSnapshot(id,submissionId,url); }
+    catch { return fail("Website snapshot could not be captured or stored", 502); }
+    const { snapshot, snapshotHash, key } = storedSnapshot;
+    const hash = await sha256(JSON.stringify([id,submissionId,url,notes,snapshotHash,time]));
+    try {
+      const results = await db().batch([
+        db().prepare("UPDATE projects SET current_submission_id=?,evidence_url=?,evidence_notes=?,evidence_hash=?,evidence_at=?,findings_json=NULL,evaluated_at=NULL,latest_run_id=NULL,status='SUBMITTED',updated_at=? WHERE id=? AND status IN ('AGREED','REVISION_REQUESTED')")
+          .bind(submissionId,url,notes,hash,time,time,id),
+        db().prepare("INSERT INTO evidence_submissions (id,project_id,submitted_by,url,notes,submission_hash,snapshot_hash,snapshot_key,manifest_json,created_at) SELECT ?,?,?,?,?,?,?,?,?,? FROM projects WHERE id=? AND current_submission_id=?")
+          .bind(submissionId,id,user.email,url,notes,hash,snapshotHash,key,JSON.stringify(snapshotManifest(snapshot)),time,id,submissionId),
+      ]);
+      if (!results[0].meta.changes || !results[1].meta.changes) {
+        await env.BUCKET.delete(key);
+        return fail("Milestone state changed; refresh and try again", 409);
+      }
+    } catch {
+      await env.BUCKET.delete(key).catch(() => {});
+      return fail("Evidence snapshot could not be stored; no submission was accepted", 502);
+    }
+    await event(id,user.email,"EVIDENCE_SUBMITTED",`Submission ${submissionId}; snapshot SHA-256 ${snapshotHash}; ${snapshot.pages.length} pages captured.`);
+    return json({ ok: true, submissionId, snapshotHash, pagesCaptured: snapshot.pages.length });
   }
   if (action === "verify") {
-    if (userRole !== "client" || !p.evidence_url || !p.evidence_hash || !["SUBMITTED","EVALUATING"].includes(p.status)) return fail("Submitted evidence is required", 409);
+    if (userRole === "client" && p.status === "SUBMITTED" && !p.current_submission_id && p.evidence_url && p.evidence_notes && p.evidence_hash) {
+      if (!env.BUCKET) return fail("Private evidence storage is unavailable", 503);
+      const legacyId = crypto.randomUUID(), migratedAt = now();
+      let stored: Awaited<ReturnType<typeof storeSnapshot>>;
+      try { stored = await storeSnapshot(id,legacyId,p.evidence_url); }
+      catch { return fail("Legacy evidence could not be snapshotted", 502); }
+      try {
+        const results = await db().batch([
+          db().prepare("UPDATE projects SET current_submission_id=?,updated_at=? WHERE id=? AND status='SUBMITTED' AND current_submission_id IS NULL AND evidence_hash=?")
+            .bind(legacyId,migratedAt,id,p.evidence_hash),
+          db().prepare("INSERT INTO evidence_submissions (id,project_id,submitted_by,url,notes,submission_hash,snapshot_hash,snapshot_key,manifest_json,created_at) SELECT ?,?,?,?,?,?,?,?,?,? FROM projects WHERE id=? AND current_submission_id=?")
+            .bind(legacyId,id,p.freelancer_email,p.evidence_url,p.evidence_notes,p.evidence_hash,stored.snapshotHash,stored.key,JSON.stringify(snapshotManifest(stored.snapshot)),migratedAt,id,legacyId),
+        ]);
+        if (!results[0].meta.changes || !results[1].meta.changes) {
+          await env.BUCKET.delete(stored.key);
+          return fail("Evidence changed during migration; refresh and retry", 409);
+        }
+      } catch {
+        await env.BUCKET.delete(stored.key).catch(() => {});
+        return fail("Legacy evidence migration failed", 502);
+      }
+      await event(id,user.email,"LEGACY_EVIDENCE_SNAPSHOTTED",`Existing URL was snapshotted at verification time by ${user.email}; snapshot ${stored.snapshotHash}. Original evidence timestamp remains unchanged.`);
+      p = await project(id);
+      if (!p) return fail("Agreement disappeared during verification", 409);
+    }
+    if (userRole !== "client" || !p.evidence_url || !p.evidence_hash || !p.current_submission_id || !["SUBMITTED","EVALUATING"].includes(p.status)) return fail("A snapshotted submission is required", 409);
+    if (!env.BUCKET) return fail("Private evidence storage is unavailable", 503);
+    const submission = await db().prepare("SELECT id,project_id,submission_hash,snapshot_hash,snapshot_key,manifest_json,created_at FROM evidence_submissions WHERE id=? AND project_id=?")
+      .bind(p.current_submission_id,id).first<EvidenceSubmission>();
+    if (!submission || submission.submission_hash !== p.evidence_hash) return fail("Evidence record does not match the milestone", 409);
     const runId = crypto.randomUUID(), startedAt = now();
     const staleBefore = new Date(Date.now() - 5 * 60_000).toISOString();
-    const claim = await db().prepare("UPDATE projects SET status='EVALUATING',latest_run_id=?,updated_at=? WHERE id=? AND evidence_hash=? AND (status='SUBMITTED' OR (status='EVALUATING' AND updated_at < ?))")
-      .bind(runId,startedAt,id,p.evidence_hash,staleBefore).run();
+    const claim = await db().prepare("UPDATE projects SET status='EVALUATING',latest_run_id=?,updated_at=? WHERE id=? AND evidence_hash=? AND current_submission_id=? AND (status='SUBMITTED' OR (status='EVALUATING' AND updated_at < ?))")
+      .bind(runId,startedAt,id,p.evidence_hash,submission.id,staleBefore).run();
     if (!claim.meta.changes) return fail("Verification is already running or evidence changed", 409);
     try {
-      await db().prepare("INSERT INTO verification_runs (id,project_id,evidence_hash,checker_version,model,started_at,state) VALUES (?,?,?,?,?,?,?)")
-        .bind(runId,id,p.evidence_hash,CHECKER_VERSION,cfg.OPENAI_API_KEY ? (cfg.OPENAI_MODEL || "gpt-4o-mini") : null,startedAt,"RUNNING").run();
-      const website = await inspectWebsite(p.evidence_url);
+      await db().prepare("INSERT INTO verification_runs (id,project_id,evidence_hash,checker_version,model,started_at,state,submission_id,snapshot_hash) VALUES (?,?,?,?,?,?,?,?,?)")
+        .bind(runId,id,p.evidence_hash,CHECKER_VERSION,cfg.OPENAI_API_KEY ? (cfg.OPENAI_MODEL || "gpt-4o-mini") : null,startedAt,"RUNNING",submission.id,submission.snapshot_hash).run();
+      const object = await env.BUCKET.get(submission.snapshot_key);
+      if (!object) throw new Error("Snapshot object missing");
+      const raw = await object.text();
+      const snapshot = await validateSnapshot(raw,submission.snapshot_hash,submission.manifest_json,p.evidence_url);
+      if (!snapshot) throw new Error("Snapshot integrity mismatch");
+      const livePages = await Promise.all(snapshot.pages.map(async page => ({ url: page.url, ...await inspectWebsite(page.url) })));
       const criteria = JSON.parse(p.criteria_json) as Criterion[];
-      const findings = evaluateCriteria(criteria, website);
+      const findings = evaluateSnapshot(criteria,snapshot,livePages);
       const note = await aiNote(criteria, findings, p.evidence_notes || "");
       const time = now();
-      await db().prepare("UPDATE verification_runs SET state='COMPLETED',completed_at=?,website_status=?,website_body_hash=?,website_truncated=?,findings_json=?,ai_note=? WHERE id=?")
-        .bind(time,website.status,website.body ? await sha256(website.body) : null,website.truncated ? 1 : 0,JSON.stringify(findings),note,runId).run();
-      const complete = await db().prepare("UPDATE projects SET findings_json=?,evaluated_at=?,status='REVIEW',updated_at=? WHERE id=? AND status='EVALUATING' AND latest_run_id=? AND evidence_hash=?")
-        .bind(JSON.stringify(findings),time,time,id,runId,p.evidence_hash).run();
+      const coverage = { snapshot: snapshotManifest(snapshot), livePages: await Promise.all(livePages.map(async page => ({ url: page.url, status: page.status, bodyHash: page.body ? await sha256(page.body) : null, truncated: page.truncated }))) };
+      const liveRoot = livePages[0];
+      await db().prepare("UPDATE verification_runs SET state='COMPLETED',completed_at=?,website_status=?,website_body_hash=?,website_truncated=?,findings_json=?,ai_note=?,coverage_json=? WHERE id=?")
+        .bind(time,liveRoot.status,coverage.livePages[0].bodyHash,liveRoot.truncated ? 1 : 0,JSON.stringify(findings),note,JSON.stringify(coverage),runId).run();
+      const complete = await db().prepare("UPDATE projects SET findings_json=?,evaluated_at=?,status='REVIEW',updated_at=? WHERE id=? AND status='EVALUATING' AND latest_run_id=? AND evidence_hash=? AND current_submission_id=?")
+        .bind(JSON.stringify(findings),time,time,id,runId,p.evidence_hash,submission.id).run();
       if (!complete.meta.changes) {
         await db().prepare("UPDATE verification_runs SET state='STALE' WHERE id=?").bind(runId).run();
         return fail("Evidence changed during verification; run it again", 409);
       }
-      await event(id,user.email,"VERIFICATION_COMPLETED",`Run ${runId}; checker ${CHECKER_VERSION}; ${note || "objective checks complete"}`);
-      return json({ findings, aiNote: note, runId });
-    } catch {
+      await event(id,user.email,"VERIFICATION_COMPLETED",`Run ${runId}; submission ${submission.id}; snapshot ${submission.snapshot_hash}; checker ${CHECKER_VERSION}; ${note || "objective checks complete"}`);
+      return json({ findings, aiNote: note, runId, snapshotHash: submission.snapshot_hash, coverage });
+    } catch (error) {
       await db().prepare("UPDATE verification_runs SET state='FAILED',completed_at=? WHERE id=?").bind(now(),runId).run().catch(() => {});
       await db().prepare("UPDATE projects SET status='SUBMITTED',updated_at=? WHERE id=? AND status='EVALUATING' AND latest_run_id=?").bind(now(),id,runId).run().catch(() => {});
-      return fail("Verification failed; you can retry safely", 502);
+      await event(id,user.email,"VERIFICATION_FAILED",`Run ${runId}; snapshot validation or evaluation failed.`).catch(() => {});
+      return fail(error instanceof Error && error.message.startsWith("Snapshot") ? "Evidence snapshot integrity failed" : "Verification failed; you can retry safely", 502);
     }
   }
   if (action === "approve" || action === "revise") {
