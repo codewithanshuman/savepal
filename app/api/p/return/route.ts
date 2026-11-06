@@ -26,7 +26,7 @@ export async function GET(request: Request) {
     });
     const result = await completeSellerOnboarding(env.DB,trackingId,merchantId,user.email,paypal,
       cfg.PAYPAL_PARTNER_MERCHANT_ID,cfg.PAYPAL_CLIENT_ID,cfg.AUDIT_HMAC_KEY);
-    const destination = new URL("/",url);
+    const destination = new URL("/app",url);
     destination.searchParams.set("project",result.projectId);
     destination.searchParams.set("paypal","connected");
     return Response.redirect(destination,302);
