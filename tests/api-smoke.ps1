@@ -1,5 +1,5 @@
 $ErrorActionPreference = 'Stop'
-$base = 'http://127.0.0.1:5174'
+$base = if ($env:SAVEPAL_BASE_URL) { $env:SAVEPAL_BASE_URL } else { 'http://127.0.0.1:5174' }
 $session = New-Object Microsoft.PowerShell.Commands.WebRequestSession
 Invoke-WebRequest -Uri "$base/signin-with-chatgpt?return_to=/" -WebSession $session -UseBasicParsing | Out-Null
 $payload = @{

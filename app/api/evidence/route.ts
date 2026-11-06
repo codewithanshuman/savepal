@@ -1,6 +1,7 @@
 import { env } from "cloudflare:workers";
 import { getChatGPTUser } from "../../chatgpt-auth";
 import { validateSnapshot } from "../../../lib/website-evidence";
+import { sha256Bytes } from "../../../lib/browser-evidence";
 
 export const runtime = "edge";
 
@@ -20,6 +21,16 @@ export async function GET(request: Request) {
   const object = await env.BUCKET.get(submission.snapshot_key);
   if (!object) return Response.json({ error: "Evidence snapshot is missing" }, { status: 409 });
   const raw = await object.text();
-  if (!await validateSnapshot(raw,submission.snapshot_hash,submission.manifest_json,submission.url)) return Response.json({ error: "Evidence snapshot failed integrity verification" }, { status: 409 });
+  const snapshot = await validateSnapshot(raw,submission.snapshot_hash,submission.manifest_json,submission.url);
+  if (!snapshot) return Response.json({ error: "Evidence snapshot failed integrity verification" }, { status: 409 });
+  if (url.searchParams.get("view") === "screenshot") {
+    if (!snapshot.renderedRoot) return Response.json({ error: "No rendered screenshot was captured" }, { status: 404 });
+    const image = await env.BUCKET.get(snapshot.renderedRoot.screenshotKey);
+    if (!image) return Response.json({ error: "Rendered screenshot is missing" }, { status: 409 });
+    const bytes = new Uint8Array(await image.arrayBuffer());
+    if (await sha256Bytes(bytes) !== snapshot.renderedRoot.screenshotHash)
+      return Response.json({ error: "Rendered screenshot failed integrity verification" }, { status: 409 });
+    return new Response(bytes as BodyInit,{ headers: { "Content-Type": "image/png", "Cache-Control": "private, no-store", "X-Content-Type-Options": "nosniff" } });
+  }
   return new Response(raw, { headers: { "Content-Type": "application/json; charset=utf-8", "Cache-Control": "private, no-store", "X-Content-Type-Options": "nosniff" } });
 }

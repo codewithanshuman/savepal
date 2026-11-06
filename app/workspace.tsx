@@ -12,9 +12,11 @@ type Project = {
   evidence_hash: string | null; evidence_at: string | null; findings: Finding[] | null;
   evaluated_at: string | null; decision_reason: string | null; payment_status: string;
   paypal_order_id: string | null; paypal_capture_id: string | null; created_at: string;
+  seller_merchant_id: string | null; payment_recipient_merchant_id: string | null;
+  paymentAwaitingReconciliation: boolean;
 };
 type Event = { actor: string; type: string; detail: string; created_at: string };
-type WorkspaceData = { user: { name: string; email: string }; projects: Project[]; paypalReady: boolean; paypalClientId: string | null; aiReady: boolean };
+type WorkspaceData = { user: { name: string; email: string }; projects: Project[]; paypalReady: boolean; sellerOnboardingReady: boolean; paymentMode: "SELLER" | "MERCHANT"; paypalClientId: string | null; paypalPartnerBnCode: string | null; aiReady: boolean };
 type PayPal = { Buttons: (options: { createOrder: () => Promise<string>; onApprove: (data: { orderID: string }) => Promise<void>; onError: (error: Error) => void; style: { layout: string; color: string; shape: string; label: string } }) => { render: (selector: string) => Promise<void> } };
 declare global { interface Window { paypal?: PayPal } }
 
@@ -26,7 +28,7 @@ const steps = ["Agreement", "Evidence", "Verification", "Decision", "Payment"];
 
 async function api(payload: Record<string, unknown>) {
   const res = await fetch("/api/workspace", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload) });
-  const data = await res.json() as { error?: string; id?: string; orderId?: string; status?: string };
+  const data = await res.json() as { error?: string; id?: string; orderId?: string; status?: string; actionUrl?: string; connected?: boolean };
   if (!res.ok) throw new Error(data.error || "Request failed");
   return data;
 }
@@ -35,13 +37,18 @@ function Pill({ children, tone = "slate" }: { children: React.ReactNode; tone?: 
   return <span className={`pill pill-${tone}`}>{children}</span>;
 }
 
-function PayPalCheckout({ project, clientId, onPaid, onError }: { project: Project; clientId: string; onPaid: () => void; onError: (message: string) => void }) {
+function PayPalCheckout({ project, clientId, merchantId, bnCode, onPaid, onError }: { project: Project; clientId: string; merchantId?: string; bnCode?: string | null; onPaid: () => void; onError: (message: string) => void }) {
   useEffect(() => {
     let cancelled = false;
     const start = async () => {
+      const sdkUrl = `https://www.paypal.com/sdk/js?client-id=${encodeURIComponent(clientId)}&currency=USD&intent=capture${merchantId ? `&merchant-id=${encodeURIComponent(merchantId)}` : ""}`;
+      const previous = document.querySelector<HTMLScriptElement>('script[data-savepal-paypal="true"]');
+      if (previous && previous.src !== sdkUrl) { previous.remove(); window.paypal = undefined; }
       if (!window.paypal) {
         const script = document.createElement("script");
-        script.src = `https://www.paypal.com/sdk/js?client-id=${encodeURIComponent(clientId)}&currency=USD&intent=capture`;
+        script.src = sdkUrl;
+        script.dataset.savepalPaypal = "true";
+        if (bnCode) script.dataset.partnerAttributionId = bnCode;
         script.async = true;
         await new Promise<void>((resolve, reject) => { script.onload = () => resolve(); script.onerror = () => reject(new Error("PayPal SDK could not load")); document.head.appendChild(script); });
       }
@@ -63,7 +70,7 @@ function PayPalCheckout({ project, clientId, onPaid, onError }: { project: Proje
     };
     start().catch(e => onError(e.message));
     return () => { cancelled = true; };
-  }, [project.id, clientId, onPaid, onError]);
+  }, [project.id, clientId, merchantId, bnCode, onPaid, onError]);
   return <div id="paypal-button" className="paypal-button" />;
 }
 
@@ -89,6 +96,10 @@ export default function Workspace() {
   const [evidenceUrl, setEvidenceUrl] = useState("");
   const [evidenceNotes, setEvidenceNotes] = useState("");
   const [reason, setReason] = useState("");
+  useEffect(() => {
+    const projectId = new URLSearchParams(window.location.search).get("project");
+    if (projectId) setSelected(projectId);
+  }, []);
 
   const refresh = useCallback(async (chosen?: string | null) => {
     const res = await fetch("/api/workspace", { cache: "no-store" });
@@ -113,6 +124,15 @@ export default function Workspace() {
       setNotice(success);
     } catch (e) { setError(e instanceof Error ? e.message : "Something went wrong"); }
     finally { setBusy(false); }
+  };
+  const connectSeller = async (id: string) => {
+    setBusy(true); setError("");
+    try {
+      const result = await api({ action: "begin_seller_onboarding", id });
+      if (result.connected) { await refresh(id); setNotice("PayPal seller connection verified."); setBusy(false); return; }
+      if (!result.actionUrl) throw new Error("PayPal did not return an onboarding link");
+      window.location.assign(result.actionUrl);
+    } catch (e) { setError(e instanceof Error ? e.message : "Seller connection failed"); setBusy(false); }
   };
   const onPaid = useCallback(() => { setNotice("PayPal sandbox capture confirmed."); refresh().catch(e => setError(e.message)); }, [refresh]);
   const onPayError = useCallback((message: string) => setError(message), []);
@@ -160,7 +180,14 @@ export default function Workspace() {
             {project.status==="REVISION_REQUESTED" && <><p>The freelancer can submit revised evidence against the same agreement.</p><div className="side-hint">Client feedback<br/><strong>{project.decision_reason}</strong></div></>}
             {project.status==="SUBMITTED" && <><p>Evidence is ready. Run the objective website checks to prepare a report.</p>{project.role==="client" && <button className="primary-button wide" disabled={busy} onClick={()=>run({action:"verify",id:project.id},"Verification report generated.")}>{busy?"Checking…":"Run verification"} <ArrowRight size={16}/></button>}</>}
             {project.status==="REVIEW" && <><p>Review each finding and the underlying evidence. You retain the final decision.</p>{project.role==="client" && <div className="decision"><label>Decision reason <span className="label-hint">Required for revisions</span><textarea value={reason} onChange={e=>setReason(e.target.value)} rows={3} placeholder="Explain your decision or requested changes."/></label><button className="primary-button wide" disabled={busy} onClick={()=>run({action:"approve",id:project.id,reason},"Milestone approved. Payment is still separate.")}>Approve milestone <Check size={16}/></button><button className="outline-button wide" disabled={busy} onClick={()=>run({action:"revise",id:project.id,reason},"Revision requested.")}>Request revision</button></div>}</>}
-            {project.status==="APPROVED" && !["COMPLETED","PARTIALLY_REFUNDED","REFUNDED"].includes(project.payment_status) && <><p>The milestone is approved. Payment requires a separate client action through PayPal sandbox.</p><div className="integration-note">Checkout pays the configured sandbox merchant. Freelancer payout needs PayPal partner setup.</div>{project.role==="client" && data.paypalReady && data.paypalClientId ? <PayPalCheckout project={project} clientId={data.paypalClientId} onPaid={onPaid} onError={onPayError}/> : <div className="integration-note">PayPal sandbox credentials need to be configured by the site owner before checkout can run.</div>}{project.role==="client" && project.paypal_capture_id && <button className="outline-button wide" disabled={busy} onClick={()=>run({action:"sync_payment",id:project.id},"Payment status checked with PayPal.")}>Refresh PayPal status <RefreshCw size={15}/></button>}</>}
+            {project.role==="freelancer" && data.paymentMode==="SELLER" && !project.seller_merchant_id && data.sellerOnboardingReady && !project.paypal_order_id && <><p>Connect your PayPal seller account so this agreement can be paid to you.</p><button className="outline-button wide" disabled={busy} onClick={()=>connectSeller(project.id)}>Connect PayPal recipient <ArrowRight size={15}/></button></>}
+            {project.role==="freelancer" && data.paymentMode==="SELLER" && project.seller_merchant_id && <div className="integration-note">PayPal recipient verified: {project.seller_merchant_id}</div>}
+            {project.status==="APPROVED" && !["COMPLETED","PARTIALLY_REFUNDED","REFUNDED"].includes(project.payment_status) && <>
+              <p>The milestone is approved. Payment requires a separate client action through PayPal sandbox.</p>
+              <div className="integration-note">{data.paymentMode==="SELLER" ? project.seller_merchant_id ? `Checkout is bound to freelancer merchant ${project.seller_merchant_id}.` : "The freelancer must connect a PayPal seller account before checkout." : "Checkout pays the configured sandbox merchant; it does not prove a freelancer payout."}</div>
+              {project.role==="client" && data.paypalReady && data.paypalClientId && (data.paymentMode==="MERCHANT" || !!project.seller_merchant_id) ? <PayPalCheckout project={project} clientId={data.paypalClientId} merchantId={data.paymentMode==="SELLER" ? project.seller_merchant_id || undefined : undefined} bnCode={data.paypalPartnerBnCode} onPaid={onPaid} onError={onPayError}/> : !data.paypalReady && <div className="integration-note">PayPal sandbox credentials and a recipient merchant ID must be configured before checkout can run.</div>}
+              {project.role==="client" && project.paymentAwaitingReconciliation && <button className="outline-button wide" disabled={busy} onClick={()=>run({action:"sync_payment",id:project.id},"Payment status checked with PayPal.")}>Reconcile with PayPal <RefreshCw size={15}/></button>}
+            </>}
             {["COMPLETED","PARTIALLY_REFUNDED","REFUNDED"].includes(project.payment_status) && <><p>{project.payment_status==="COMPLETED" ? "The PayPal sandbox capture was confirmed." : project.payment_status==="REFUNDED" ? "The PayPal sandbox capture was refunded." : "The PayPal sandbox capture was partially refunded."}</p><div className="receipt"><small>CAPTURE ID</small><strong>{project.paypal_capture_id}</strong></div></>}
           </section><section className="panel side-details"><h3>Agreement details</h3><div><span>Client</span><strong>{project.client_email}</strong></div><div><span>Freelancer</span><strong>{project.freelancer_email}</strong></div><div><span>Created</span><strong>{date(project.created_at)}</strong></div><div><span>Currency</span><strong>USD</strong></div><div><span>Payment</span><strong>{project.payment_status.replaceAll("_"," ")}</strong></div></section></aside></div>
         </div>}

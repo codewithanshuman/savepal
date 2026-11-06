@@ -27,6 +27,10 @@ export const projects = sqliteTable("projects", {
   paymentCaptureRequestId: text("payment_capture_request_id"),
   paymentCaptureRequestedAt: text("payment_capture_requested_at"),
   approvalReceiptId: text("approval_receipt_id"),
+  sellerMerchantId: text("seller_merchant_id"),
+  sellerVerifiedAt: text("seller_verified_at"),
+  paymentRecipientMerchantId: text("payment_recipient_merchant_id"),
+  paymentLastReconciledAt: text("payment_last_reconciled_at"),
   latestRunId: text("latest_run_id"),
   auditHeadHash: text("audit_head_hash"),
   createdAt: text("created_at").notNull(),
@@ -115,4 +119,39 @@ export const paymentObservations = sqliteTable("payment_observations", {
   currency: text("currency").notNull(),
   payloadHash: text("payload_hash").notNull(),
   observedAt: text("observed_at").notNull(),
+});
+
+export const verificationArtifacts = sqliteTable("verification_artifacts", {
+  id: text("id").primaryKey(),
+  projectId: text("project_id").notNull(),
+  runId: text("run_id").notNull().unique(),
+  submissionId: text("submission_id").notNull(),
+  snapshotHash: text("snapshot_hash").notNull(),
+  criteriaHash: text("criteria_hash").notNull(),
+  liveKey: text("live_key").notNull().unique(),
+  liveHash: text("live_hash").notNull(),
+  objectiveHash: text("objective_hash").notNull(),
+  createdAt: text("created_at").notNull(),
+});
+
+export const sellerOnboarding = sqliteTable("seller_onboarding", {
+  id: text("id").primaryKey(),
+  projectId: text("project_id").notNull(),
+  freelancerEmail: text("freelancer_email").notNull(),
+  trackingId: text("tracking_id").notNull().unique(),
+  referralId: text("referral_id"),
+  merchantId: text("merchant_id"),
+  status: text("status").notNull(),
+  createdAt: text("created_at").notNull(),
+  verifiedAt: text("verified_at"),
+  lastCheckedAt: text("last_checked_at"),
+});
+
+export const reconciliationAttempts = sqliteTable("reconciliation_attempts", {
+  id: text("id").primaryKey(),
+  projectId: text("project_id").notNull(),
+  source: text("source").notNull(),
+  outcome: text("outcome").notNull(),
+  detail: text("detail").notNull(),
+  attemptedAt: text("attempted_at").notNull(),
 });

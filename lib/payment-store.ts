@@ -1,11 +1,12 @@
 import { canApplyPaymentStatus, type PaymentStatus } from "./assurance.ts";
 import { appendAudit } from "./audit.ts";
-import { captureMatchesOrder, captureStatus, orderCapture, safeProviderId, type PayPalCapture, type PayPalOrder } from "./paypal-assurance.ts";
+import { captureMatchesOrder, captureStatus, orderCapture, safeMerchantId, safeProviderId, type PayPalCapture, type PayPalOrder } from "./paypal-assurance.ts";
 import { sha256 } from "./website-evidence.ts";
 
 export type PaymentProject = {
   id: string; status: string; amount_cents: number; currency: string;
   paypal_order_id: string | null; paypal_capture_id: string | null;
+  payment_recipient_merchant_id?: string | null;
   payment_status: string;
 };
 
@@ -38,13 +39,16 @@ export async function recordCaptureObservation(
   const orderId = project.paypal_order_id;
   const captureId = capture.id;
   if (project.status !== "APPROVED" || !orderId || !safeProviderId(orderId) ||
+      !safeMerchantId(project.payment_recipient_merchant_id) ||
       !safeProviderId(captureId) ||
       !captureMatchesOrder(capture,{
         projectId: project.id, orderId, captureId,
         customId, amountCents: project.amount_cents, currency: project.currency,
+        merchantId: project.payment_recipient_merchant_id || undefined,
       }) || orderCapture(order,{
         projectId: project.id, orderId, captureId,
         customId, amountCents: project.amount_cents, currency: project.currency,
+        merchantId: project.payment_recipient_merchant_id || undefined,
       })?.id !== captureId) throw new Error("PayPal capture does not match the approved milestone");
   if (project.paypal_capture_id && project.paypal_capture_id !== captureId) throw new Error("Conflicting PayPal capture ID");
   const incoming = captureStatus(capture);
@@ -56,10 +60,11 @@ export async function recordCaptureObservation(
     if (previous && (previous.payload_hash !== payloadHash || previous.project_id !== project.id || previous.capture_id !== captureId)) throw new Error("Conflicting PayPal webhook replay");
   }
   for (let attempt = 0; attempt < 4; attempt++) {
-    const current = await db.prepare("SELECT id,status,amount_cents,currency,paypal_order_id,paypal_capture_id,payment_status FROM projects WHERE id=?")
+    const current = await db.prepare("SELECT id,status,amount_cents,currency,paypal_order_id,paypal_capture_id,payment_status,payment_recipient_merchant_id FROM projects WHERE id=?")
       .bind(project.id).first<PaymentProject>();
     if (!current || current.status !== "APPROVED" || current.paypal_order_id !== orderId ||
         current.amount_cents !== project.amount_cents || current.currency !== project.currency ||
+        (current.payment_recipient_merchant_id || null) !== (project.payment_recipient_merchant_id || null) ||
         (current.paypal_capture_id && current.paypal_capture_id !== captureId)) throw new Error("Milestone changed during payment reconciliation");
     const next = nextPaymentStatus(current.payment_status,incoming);
     const time = new Date().toISOString();

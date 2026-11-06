@@ -1,7 +1,8 @@
 import { MAX_HTML_BYTES, readBoundedHtml, type Criterion, type Finding } from "./assurance.ts";
 import { internalLinks, normalizedWords, phraseEvidence, visibleText, type InternalLink } from "./html-evidence.ts";
+import { validateRenderedPage, type RenderedPage } from "./browser-evidence.ts";
 
-export const SNAPSHOT_VERSION = "website-snapshot-v1";
+export const SNAPSHOT_VERSION = "website-snapshot-v2";
 export const MAX_PAGES = 6;
 
 export type SnapshotPage = {
@@ -26,6 +27,7 @@ export type WebsiteSnapshot = {
   pages: SnapshotPage[];
   discoveredInternalLinks: number;
   coverageLimited: boolean;
+  renderedRoot?: RenderedPage;
 };
 export type SnapshotManifest = {
   version: string;
@@ -34,6 +36,7 @@ export type SnapshotManifest = {
   pages: Array<Omit<SnapshotPage, "body" | "links"> & { bytes: number; linksDiscovered: number }>;
   discoveredInternalLinks: number;
   coverageLimited: boolean;
+  renderedRoot?: Omit<RenderedPage,"html"> & { bytes: number };
 };
 export type AdvancedFinding = Finding & {
   evidenceRefs: Array<{ url: string; bodyHash: string | null; excerpt?: string }>;
@@ -41,7 +44,7 @@ export type AdvancedFinding = Finding & {
   requiresHumanReview: boolean;
   coverage: "FULL" | "PARTIAL";
 };
-export type LivePage = { url: string; status: number; body: string };
+export type LivePage = { url: string; status: number; body: string; renderedRoot?: RenderedPage };
 
 export async function sha256(value: string): Promise<string> {
   const raw = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(value));
@@ -115,14 +118,16 @@ export function snapshotManifest(snapshot: WebsiteSnapshot): SnapshotManifest {
     version: snapshot.version, rootUrl: snapshot.rootUrl, capturedAt: snapshot.capturedAt,
     discoveredInternalLinks: snapshot.discoveredInternalLinks, coverageLimited: snapshot.coverageLimited,
     pages: snapshot.pages.map(({ body, links, ...page }) => ({ ...page, bytes: new TextEncoder().encode(body).length, linksDiscovered: links.length })),
+    ...(snapshot.renderedRoot ? { renderedRoot: (({ html, ...rest }) => ({...rest,bytes:new TextEncoder().encode(html).length}))(snapshot.renderedRoot) } : {}),
   };
 }
 
 export async function validateSnapshot(raw: string, expectedHash: string, expectedManifestJson: string, rootUrl: string): Promise<WebsiteSnapshot | null> {
-  if (raw.length > MAX_PAGES * 120_000 || await sha256(raw) !== expectedHash) return null;
+  if (raw.length > (MAX_PAGES + 1) * 120_000 || await sha256(raw) !== expectedHash) return null;
   try {
     const snapshot = JSON.parse(raw) as WebsiteSnapshot;
-    if (snapshot.version !== SNAPSHOT_VERSION || snapshot.rootUrl !== rootUrl || !Array.isArray(snapshot.pages) || snapshot.pages.length < 1 || snapshot.pages.length > MAX_PAGES) return null;
+    if (![SNAPSHOT_VERSION,"website-snapshot-v1"].includes(snapshot.version) || snapshot.rootUrl !== rootUrl || !Array.isArray(snapshot.pages) || snapshot.pages.length < 1 || snapshot.pages.length > MAX_PAGES) return null;
+    if (!await validateRenderedPage(snapshot.renderedRoot,rootUrl)) return null;
     const origin = new URL(rootUrl).origin;
     for (const page of snapshot.pages) {
       if (typeof page.url !== "string" || new URL(page.url).origin !== origin || typeof page.body !== "string" || new TextEncoder().encode(page.body).length > MAX_HTML_BYTES) return null;
@@ -136,11 +141,12 @@ export async function validateSnapshot(raw: string, expectedHash: string, expect
 export function evaluateSnapshot(criteria: Criterion[], snapshot: WebsiteSnapshot, livePages: LivePage[]): AdvancedFinding[] {
   const root = snapshot.pages[0];
   const liveByUrl = new Map(livePages.map(page => [page.url,page]));
-  const submittedText = new Map(snapshot.pages.map(page => [page.url,extractedText(page.body)]));
-  const currentText = new Map(livePages.map(page => [page.url,extractedText(page.body)]));
+  const submittedText = new Map(snapshot.pages.map(page => [page.url,extractedText(page.body) + (page.url === root.url && snapshot.renderedRoot ? ` ${extractedText(snapshot.renderedRoot.html)}` : "")]));
+  const currentText = new Map(livePages.map(page => [page.url,extractedText(page.body) + (page.url === root.url && page.renderedRoot ? ` ${extractedText(page.renderedRoot.html)}` : "")]));
   const liveSuccess = (page: SnapshotPage) => {
     const live = liveByUrl.get(page.url);
-    return !!live && live.status >= 200 && live.status < 300 && !!live.body;
+    return !!live && live.status >= 200 && live.status < 300 && !!live.body &&
+      (page.url !== root.url || !snapshot.renderedRoot || !!live.renderedRoot);
   };
   return criteria.map(c => {
     if (c.kind === "reachable") {
@@ -160,20 +166,25 @@ export function evaluateSnapshot(criteria: Criterion[], snapshot: WebsiteSnapsho
     }
     if (c.kind === "contains") {
       const needle = c.needle || "";
-      const matches = snapshot.pages.map(page => ({ page, excerpt: phraseEvidence(submittedText.get(page.url) || "",needle) }))
-        .filter((match): match is { page: SnapshotPage; excerpt: string } => !!match.excerpt);
+      const matches = snapshot.pages.map(page => ({
+        page, excerpt: phraseEvidence(submittedText.get(page.url) || "",needle),
+        evidenceHash: page.url === root.url && snapshot.renderedRoot && !phraseEvidence(extractedText(page.body),needle)
+          ? snapshot.renderedRoot.htmlHash : page.bodyHash,
+      })).filter(match => !!match.excerpt);
       const confirmed = matches.filter(({page}) => liveSuccess(page) && !!phraseEvidence(currentText.get(page.url) || "",needle));
-      const complete = !snapshot.coverageLimited && snapshot.pages.every(page => page.status >= 200 && page.status < 300 && !page.truncated && liveSuccess(page));
+      const complete = !snapshot.coverageLimited && !snapshot.renderedRoot?.truncated &&
+        !liveByUrl.get(root.url)?.renderedRoot?.truncated &&
+        snapshot.pages.every(page => page.status >= 200 && page.status < 300 && !page.truncated && liveSuccess(page));
       const status = confirmed.length ? "VERIFIED" : !matches.length && complete ? "FAILED" : "INCONCLUSIVE";
       return {
-        label: c.label, status, check: "Whole-phrase visible text in submitted and live pages",
+        label: c.label, status, check: snapshot.renderedRoot ? "Whole-phrase visible text in submitted and live HTML plus rendered root DOM" : "Whole-phrase visible text in submitted and live pages",
         explanation: confirmed.length ? `The whole phrase appears in ${confirmed.length} submitted page${confirmed.length === 1 ? "" : "s"} and remains present on the same live page.` :
           matches.length ? "The submitted page contained the phrase, but it is missing or could not be confirmed on that live page." :
           complete ? "The phrase was absent from all captured, live-confirmed internal pages." :
           "The phrase was not found, but page availability or crawl coverage is incomplete.",
-        evidenceRefs: matches.length ? matches.map(({page,excerpt}) => ({ url:page.url,bodyHash:page.bodyHash,excerpt })) :
+        evidenceRefs: matches.length ? matches.map(({page,excerpt,evidenceHash}) => ({ url:page.url,bodyHash:evidenceHash,excerpt:excerpt! })) :
           snapshot.pages.map(p => ({ url:p.url,bodyHash:p.bodyHash })),
-        signals: [`${snapshot.pages.length} page(s) captured`,`${confirmed.length} live-confirmed whole-phrase match(es)`,`Discovered-page coverage ${complete ? "complete" : "partial"}`],
+        signals: [`${snapshot.pages.length} page(s) captured`,`${confirmed.length} live-confirmed whole-phrase match(es)`,`Discovered-page coverage ${complete ? "complete" : "partial"}`,snapshot.renderedRoot ? "Browser-rendered root DOM captured at submission and verification" : "Browser-rendered DOM unavailable"],
         requiresHumanReview: status !== "VERIFIED", coverage: complete ? "FULL" : "PARTIAL",
       };
     }

@@ -6,8 +6,12 @@ import { captureWebsite, evaluateSnapshot, sha256, snapshotManifest, validateSna
 import { reviewWithAi } from "../../../lib/ai-verification";
 import { approveWithReceipt, requireApprovalReceipt, type StoredApprovalProject } from "../../../lib/approval-store";
 import { orderCustomId } from "../../../lib/approval-receipt";
-import { PayPalSandbox, orderCapture, orderMatches, retrySafe, safeProviderId, type ExpectedPayment } from "../../../lib/paypal-assurance";
+import { PayPalSandbox, orderCapture, orderMatches, retrySafe, safeMerchantId, safeProviderId, type ExpectedPayment } from "../../../lib/paypal-assurance";
 import { recordCaptureObservation } from "../../../lib/payment-store";
+import { createVerificationInput, type CapturedLivePage } from "../../../lib/verification-proof";
+import { beginSellerOnboarding, requireReadySeller } from "../../../lib/seller-onboarding";
+import { captureRenderedPage } from "../../../lib/browser-evidence";
+import { reconcileProject } from "../../../lib/payment-reconciliation";
 
 export const runtime = "edge";
 
@@ -21,6 +25,8 @@ type Project = StoredApprovalProject & {
   payment_status: string; payment_request_id: string | null;
   payment_order_requested_at: string | null; payment_capture_request_id: string | null;
   payment_capture_requested_at: string | null;
+  seller_merchant_id: string | null; seller_verified_at: string | null;
+  payment_recipient_merchant_id: string | null; payment_last_reconciled_at: string | null;
   created_at: string; updated_at: string;
 };
 type EvidenceSubmission = { id: string; project_id: string; submission_hash: string; snapshot_hash: string; snapshot_key: string; manifest_json: string; created_at: string };
@@ -29,7 +35,7 @@ const db = () => {
   if (!env.DB) throw new Error("Database is unavailable");
   return env.DB;
 };
-const cfg = env as Cloudflare.Env & { PAYPAL_CLIENT_ID?: string; PAYPAL_CLIENT_SECRET?: string; OPENAI_API_KEY?: string; OPENAI_MODEL?: string; AUDIT_HMAC_KEY?: string };
+const cfg = env as Cloudflare.Env & { PAYPAL_CLIENT_ID?: string; PAYPAL_CLIENT_SECRET?: string; PAYPAL_MERCHANT_ID?: string; PAYPAL_PARTNER_MERCHANT_ID?: string; PAYPAL_PARTNER_BN_CODE?: string; SITE_ORIGIN?: string; OPENAI_API_KEY?: string; OPENAI_MODEL?: string; AUDIT_HMAC_KEY?: string; BROWSER_RUN_ACCOUNT_ID?: string; BROWSER_RUN_API_TOKEN?: string };
 const json = (data: unknown, status = 200) => Response.json(data, { status, headers: { "Cache-Control": "no-store" } });
 const now = () => new Date().toISOString();
 const fail = (message: string, status = 400) => json({ error: message }, status);
@@ -55,6 +61,7 @@ function view(p: Project, user: { userId: string; email: string }) {
     findings: p.findings_json ? JSON.parse(p.findings_json) as Finding[] : null,
     criteria_json: undefined, findings_json: undefined, payment_request_id: undefined,
     payment_capture_request_id: undefined, audit_head_hash: undefined,
+    paymentAwaitingReconciliation: !!p.payment_request_id || !!p.paypal_order_id,
   };
 }
 
@@ -71,11 +78,12 @@ export async function GET(request: Request) {
     const verificationRun = p.latest_run_id ? await db().prepare("SELECT id,submission_id,snapshot_hash,checker_version,model,started_at,completed_at,state,website_status,website_body_hash,website_truncated,findings_json,ai_note,coverage_json FROM verification_runs WHERE id=? AND project_id=?").bind(p.latest_run_id,id).first() : null;
     const approvalReceipt = p.approval_receipt_id ? await db().prepare("SELECT * FROM approval_receipts WHERE id=? AND project_id=?").bind(p.approval_receipt_id,id).first() : null;
     const paymentObservations = await db().prepare("SELECT id,source,provider_event_id,order_id,capture_id,provider_status,projected_status,amount_cents,currency,payload_hash,observed_at FROM payment_observations WHERE project_id=? ORDER BY observed_at DESC LIMIT 30").bind(id).all();
-    return json({ project: view(p, user), audit: audit.results, auditIntegrity, evidenceHistory: submissions.results.map(s => ({ ...s, manifest: JSON.parse(s.manifest_json), manifest_json: undefined })), verificationRun, approvalReceipt, paymentObservations: paymentObservations.results });
+    const reconciliationAttempts = await db().prepare("SELECT id,source,outcome,detail,attempted_at FROM reconciliation_attempts WHERE project_id=? ORDER BY attempted_at DESC LIMIT 30").bind(id).all();
+    return json({ project: view(p, user), audit: audit.results, auditIntegrity, evidenceHistory: submissions.results.map(s => ({ ...s, manifest: JSON.parse(s.manifest_json), manifest_json: undefined })), verificationRun, approvalReceipt, paymentObservations: paymentObservations.results, reconciliationAttempts: reconciliationAttempts.results });
   }
   const rows = await db().prepare("SELECT * FROM projects WHERE client_id = ? OR lower(freelancer_email) = ? ORDER BY created_at DESC")
     .bind(user.userId, user.email.toLowerCase()).all<Project>();
-  return json({ user: { name: user.displayName, email: user.email }, projects: rows.results.map(p => view(p, user)), paypalReady: !!(cfg.PAYPAL_CLIENT_ID && cfg.PAYPAL_CLIENT_SECRET), paypalClientId: cfg.PAYPAL_CLIENT_ID || null, aiReady: !!cfg.OPENAI_API_KEY });
+  return json({ user: { name: user.displayName, email: user.email }, projects: rows.results.map(p => view(p, user)), paypalReady: !!(cfg.PAYPAL_CLIENT_ID && cfg.PAYPAL_CLIENT_SECRET && (cfg.PAYPAL_PARTNER_MERCHANT_ID ? safeMerchantId(cfg.PAYPAL_PARTNER_MERCHANT_ID) && cfg.PAYPAL_PARTNER_BN_CODE : safeMerchantId(cfg.PAYPAL_MERCHANT_ID))), sellerOnboardingReady: !!(cfg.PAYPAL_CLIENT_ID && cfg.PAYPAL_CLIENT_SECRET && safeMerchantId(cfg.PAYPAL_PARTNER_MERCHANT_ID) && cfg.PAYPAL_PARTNER_BN_CODE), paymentMode: cfg.PAYPAL_PARTNER_MERCHANT_ID ? "SELLER" : "MERCHANT", paypalClientId: cfg.PAYPAL_CLIENT_ID || null, paypalPartnerBnCode: cfg.PAYPAL_PARTNER_BN_CODE || null, aiReady: !!cfg.OPENAI_API_KEY });
 }
 
 async function inspectWebsite(url: string): Promise<WebsiteResult> {
@@ -89,6 +97,11 @@ async function inspectWebsite(url: string): Promise<WebsiteResult> {
 async function storeSnapshot(projectId: string, submissionId: string, url: string, criteria: Criterion[]) {
   if (!env.BUCKET) throw new Error("Private evidence storage is unavailable");
   const snapshot = await captureWebsite(url,fetch,criteria);
+  if (cfg.BROWSER_RUN_ACCOUNT_ID && cfg.BROWSER_RUN_API_TOKEN) {
+    const capture = await captureRenderedPage(url,`rendered/${projectId}/${submissionId}.png`,cfg.BROWSER_RUN_ACCOUNT_ID,cfg.BROWSER_RUN_API_TOKEN);
+    await env.BUCKET.put(capture.rendered.screenshotKey,capture.screenshot,{ httpMetadata: { contentType: "image/png" } });
+    snapshot.renderedRoot = capture.rendered;
+  }
   const raw = JSON.stringify(snapshot);
   const snapshotHash = await sha256(raw);
   const key = `evidence/${projectId}/${submissionId}.json`;
@@ -97,11 +110,16 @@ async function storeSnapshot(projectId: string, submissionId: string, url: strin
 }
 function paypal() {
   if (!cfg.PAYPAL_CLIENT_ID || !cfg.PAYPAL_CLIENT_SECRET) throw new Error("PayPal sandbox credentials are not configured");
-  return new PayPalSandbox(cfg.PAYPAL_CLIENT_ID,cfg.PAYPAL_CLIENT_SECRET);
+  const partner = cfg.PAYPAL_PARTNER_MERCHANT_ID && cfg.PAYPAL_PARTNER_BN_CODE ? {
+    clientId: cfg.PAYPAL_CLIENT_ID, attributionId: cfg.PAYPAL_PARTNER_BN_CODE, merchantId: cfg.PAYPAL_PARTNER_MERCHANT_ID,
+  } : undefined;
+  return new PayPalSandbox(cfg.PAYPAL_CLIENT_ID,cfg.PAYPAL_CLIENT_SECRET,fetch,partner);
 }
 function paymentExpectation(p: Project, customId: string): ExpectedPayment {
+  const merchantId = p.payment_recipient_merchant_id || (cfg.PAYPAL_PARTNER_MERCHANT_ID ? p.seller_merchant_id : cfg.PAYPAL_MERCHANT_ID);
+  if (!safeMerchantId(merchantId)) throw new Error("A verified PayPal recipient is required before checkout");
   return { projectId: p.id, orderId: p.paypal_order_id || undefined, captureId: p.paypal_capture_id || undefined,
-    customId, amountCents: p.amount_cents, currency: p.currency };
+    customId, amountCents: p.amount_cents, currency: p.currency, merchantId };
 }
 
 export async function POST(request: Request) {
@@ -212,9 +230,19 @@ export async function POST(request: Request) {
       const raw = await object.text();
       const snapshot = await validateSnapshot(raw,submission.snapshot_hash,submission.manifest_json,p.evidence_url);
       if (!snapshot) throw new Error("Snapshot integrity mismatch");
-      const livePages = await Promise.all(snapshot.pages.map(async page => ({ url: page.url, ...await inspectWebsite(page.url) })));
+      const livePages: CapturedLivePage[] = await Promise.all(snapshot.pages.map(async page => ({ url: page.url, ...await inspectWebsite(page.url) })));
+      if (snapshot.renderedRoot) {
+        if (!cfg.BROWSER_RUN_ACCOUNT_ID || !cfg.BROWSER_RUN_API_TOKEN) throw new Error("Browser evidence service is unavailable for replay");
+        const capture = await captureRenderedPage(snapshot.rootUrl,`rendered/${id}/${runId}.png`,cfg.BROWSER_RUN_ACCOUNT_ID,cfg.BROWSER_RUN_API_TOKEN);
+        await env.BUCKET.put(capture.rendered.screenshotKey,capture.screenshot,{ httpMetadata: { contentType: "image/png" } });
+        livePages[0] = { ...livePages[0], renderedRoot: capture.rendered };
+      }
       const criteria = JSON.parse(p.criteria_json) as Criterion[];
       const objectiveFindings = evaluateSnapshot(criteria,snapshot,livePages);
+      const liveEvidence = await createVerificationInput(id,runId,submission.id,submission.snapshot_hash,p.criteria_json,livePages,now());
+      const liveKey = `verification/${id}/${runId}.json`;
+      await env.BUCKET.put(liveKey,liveEvidence.raw,{ httpMetadata: { contentType: "application/json" } });
+      const objectiveHash = await sha256(JSON.stringify(objectiveFindings));
       const aiReview = cfg.OPENAI_API_KEY ? await reviewWithAi(cfg.OPENAI_API_KEY,cfg.OPENAI_MODEL || "gpt-4o-mini",criteria,objectiveFindings,snapshot,livePages,p.evidence_notes || "") : null;
       const findings = aiReview?.status === "COMPLETED" ? objectiveFindings.map((finding,index) => ({ ...finding, aiReview: aiReview.assessments[index] })) : objectiveFindings;
       const note = aiReview?.note || null;
@@ -225,11 +253,15 @@ export async function POST(request: Request) {
         ai: aiReview ? { status: aiReview.status, model: aiReview.model, responseId: aiReview.responseId, inputHash: aiReview.inputHash, outputHash: aiReview.outputHash } : { status: "UNCONFIGURED" },
       };
       const liveRoot = livePages[0];
-      await db().prepare("UPDATE verification_runs SET state='COMPLETED',completed_at=?,website_status=?,website_body_hash=?,website_truncated=?,findings_json=?,ai_note=?,coverage_json=? WHERE id=?")
-        .bind(time,liveRoot.status,coverage.livePages[0].bodyHash,liveRoot.truncated ? 1 : 0,JSON.stringify(findings),note,JSON.stringify(coverage),runId).run();
-      const complete = await db().prepare("UPDATE projects SET findings_json=?,evaluated_at=?,status='REVIEW',updated_at=? WHERE id=? AND status='EVALUATING' AND latest_run_id=? AND evidence_hash=? AND current_submission_id=?")
-        .bind(JSON.stringify(findings),time,time,id,runId,p.evidence_hash,submission.id).run();
-      if (!complete.meta.changes) {
+      const saved = await db().batch([
+        db().prepare("UPDATE verification_runs SET state='COMPLETED',completed_at=?,website_status=?,website_body_hash=?,website_truncated=?,findings_json=?,ai_note=?,coverage_json=? WHERE id=? AND state='RUNNING'")
+          .bind(time,liveRoot.status,coverage.livePages[0].bodyHash,liveRoot.truncated ? 1 : 0,JSON.stringify(findings),note,JSON.stringify(coverage),runId),
+        db().prepare("UPDATE projects SET findings_json=?,evaluated_at=?,status='REVIEW',updated_at=? WHERE id=? AND status='EVALUATING' AND latest_run_id=? AND evidence_hash=? AND current_submission_id=?")
+          .bind(JSON.stringify(findings),time,time,id,runId,p.evidence_hash,submission.id),
+        db().prepare("INSERT INTO verification_artifacts (id,project_id,run_id,submission_id,snapshot_hash,criteria_hash,live_key,live_hash,objective_hash,created_at) SELECT ?,?,?,?,?,?,?,?,?,? FROM projects WHERE id=? AND status='REVIEW' AND latest_run_id=?")
+          .bind(crypto.randomUUID(),id,runId,submission.id,submission.snapshot_hash,liveEvidence.input.criteriaHash,liveKey,liveEvidence.hash,objectiveHash,time,id,runId),
+      ]);
+      if (!saved[0].meta.changes || !saved[1].meta.changes || !saved[2].meta.changes) {
         await db().prepare("UPDATE verification_runs SET state='STALE' WHERE id=?").bind(runId).run();
         return fail("Evidence changed during verification; run it again", 409);
       }
@@ -263,6 +295,19 @@ export async function POST(request: Request) {
     await event(id,user.email,"REVISION_REQUESTED",reason);
     return json({ ok: true });
   }
+  if (action === "begin_seller_onboarding") {
+    if (userRole !== "freelancer") return fail("Only the assigned freelancer can connect PayPal",403);
+    if (!cfg.PAYPAL_PARTNER_MERCHANT_ID || !cfg.PAYPAL_PARTNER_BN_CODE || !cfg.PAYPAL_CLIENT_ID || !cfg.PAYPAL_CLIENT_SECRET)
+      return fail("PayPal partner onboarding is not configured",503);
+    try {
+      const base = new URL(cfg.SITE_ORIGIN || request.url);
+      if (base.protocol !== "https:" && base.hostname !== "127.0.0.1") throw new Error("A secure Site origin is required");
+      const returnUrl = new URL("/api/p/return",base).toString();
+      const result = await beginSellerOnboarding(db(),p,user.email,paypal(),returnUrl,
+        cfg.PAYPAL_PARTNER_MERCHANT_ID,cfg.PAYPAL_CLIENT_ID,cfg.AUDIT_HMAC_KEY);
+      return json(result);
+    } catch (error) { return fail(error instanceof Error ? error.message : "PayPal onboarding failed",502); }
+  }
   if (action === "create_order") {
     if (userRole !== "client" || p.status !== "APPROVED") return fail("Client approval is required", 403);
     if (["COMPLETED","PARTIALLY_REFUNDED","REFUNDED"].includes(p.payment_status)) return fail("This milestone already has a captured payment", 409);
@@ -271,8 +316,10 @@ export async function POST(request: Request) {
       const receipt = await requireApprovalReceipt(db(),p,cfg.AUDIT_HMAC_KEY);
       const client = paypal();
       const expected = paymentExpectation(p,orderCustomId(receipt));
+      if (cfg.PAYPAL_PARTNER_MERCHANT_ID && cfg.PAYPAL_CLIENT_ID)
+        await requireReadySeller(db(),p,client,cfg.PAYPAL_PARTNER_MERCHANT_ID,cfg.PAYPAL_CLIENT_ID);
       if (p.paypal_order_id) {
-        const existing = await client.getOrder(p.paypal_order_id);
+        const existing = await client.getOrder(p.paypal_order_id,expected.merchantId);
         if (!orderMatches(existing,expected)) return fail("PayPal order does not match the approval receipt", 409);
         const recorded = await db().prepare("SELECT id FROM audit_events WHERE project_id=? AND type IN ('PAYPAL_ORDER_CREATED','PAYPAL_ORDER_RECOVERED') AND detail LIKE ? LIMIT 1")
           .bind(id,`%${p.paypal_order_id}%`).first();
@@ -282,8 +329,8 @@ export async function POST(request: Request) {
       if (p.payment_request_id && !retrySafe(p.payment_order_requested_at)) return fail("Order outcome is uncertain after the safe retry window; reconcile with PayPal before another attempt", 409);
       const requestId = p.payment_request_id || crypto.randomUUID();
       const requestedAt = p.payment_order_requested_at || now();
-      const reserved = await db().prepare("UPDATE projects SET payment_request_id=COALESCE(payment_request_id,?),payment_order_requested_at=COALESCE(payment_order_requested_at,?),payment_status='PENDING',updated_at=? WHERE id=? AND status='APPROVED' AND payment_status NOT IN ('COMPLETED','FAILED','PARTIALLY_REFUNDED','REFUNDED') AND paypal_order_id IS NULL AND (payment_request_id IS NULL OR payment_request_id=?) AND approval_receipt_id=?")
-        .bind(requestId,requestedAt,now(),id,requestId,receipt.id).run();
+      const reserved = await db().prepare("UPDATE projects SET payment_request_id=COALESCE(payment_request_id,?),payment_order_requested_at=COALESCE(payment_order_requested_at,?),payment_recipient_merchant_id=COALESCE(payment_recipient_merchant_id,?),payment_status='PENDING',updated_at=? WHERE id=? AND status='APPROVED' AND payment_status NOT IN ('COMPLETED','FAILED','PARTIALLY_REFUNDED','REFUNDED') AND paypal_order_id IS NULL AND (payment_request_id IS NULL OR payment_request_id=?) AND (payment_recipient_merchant_id IS NULL OR payment_recipient_merchant_id=?) AND approval_receipt_id=?")
+        .bind(requestId,requestedAt,expected.merchantId,now(),id,requestId,expected.merchantId,receipt.id).run();
       if (!reserved.meta.changes) return fail("Payment state changed; refresh before checkout", 409);
       const created = await client.createOrder(expected,requestId);
       if (!safeProviderId(created.id)) throw new Error("PayPal returned an invalid order ID");
@@ -292,7 +339,7 @@ export async function POST(request: Request) {
       const latest = await project(id);
       if (!latest?.paypal_order_id) throw new Error("Order was created but could not be recorded; retry with the same idempotency key");
       if (latest.paypal_order_id !== created.id) throw new Error("PayPal returned a conflicting order ID");
-      const providerOrder = await client.getOrder(created.id);
+      const providerOrder = await client.getOrder(created.id,expected.merchantId);
       if (!orderMatches(providerOrder,{...expected,orderId:created.id})) throw new Error("PayPal order amount, reference, or approval binding does not match");
       if (stored.meta.changes) await event(id,user.email,"PAYPAL_ORDER_CREATED",`Sandbox order ${created.id}; approval ${receipt.receipt_hash}; request ${requestId}`);
       return json({ orderId: latest.paypal_order_id });
@@ -304,7 +351,7 @@ export async function POST(request: Request) {
       const receipt = await requireApprovalReceipt(db(),p,cfg.AUDIT_HMAC_KEY);
       const client = paypal();
       const expected = paymentExpectation(p,orderCustomId(receipt));
-      let order = await client.getOrder(p.paypal_order_id);
+      let order = await client.getOrder(p.paypal_order_id,expected.merchantId);
       if (!orderMatches(order,expected)) return fail("PayPal order does not match the approval receipt", 409);
       const providerCaptures = order.purchase_units?.[0]?.payments?.captures || [];
       let captured = orderCapture(order,expected);
@@ -317,30 +364,25 @@ export async function POST(request: Request) {
         const reserved = await db().prepare("UPDATE projects SET payment_capture_request_id=COALESCE(payment_capture_request_id,?),payment_capture_requested_at=COALESCE(payment_capture_requested_at,?),updated_at=? WHERE id=? AND status='APPROVED' AND paypal_order_id=? AND paypal_capture_id IS NULL AND payment_status NOT IN ('COMPLETED','PARTIALLY_REFUNDED','REFUNDED') AND approval_receipt_id=? AND (payment_capture_request_id IS NULL OR payment_capture_request_id=?)")
           .bind(requestId,requestedAt,now(),id,p.paypal_order_id,receipt.id,requestId).run();
         if (!reserved.meta.changes) return fail("Capture state changed; reconcile before retrying", 409);
-        const result = await client.captureOrder(p.paypal_order_id,requestId);
+        const result = await client.captureOrder(p.paypal_order_id,requestId,expected.merchantId);
         if (result.id && result.id !== p.paypal_order_id) throw new Error("PayPal capture returned a different order ID");
-        order = await client.getOrder(p.paypal_order_id);
+        order = await client.getOrder(p.paypal_order_id,expected.merchantId);
         if (!orderMatches(order,expected)) throw new Error("PayPal order changed during capture");
         captured = orderCapture(order,expected);
         if (!captured) throw new Error("PayPal capture could not be confirmed from the order");
       }
-      const providerCapture = await client.getCapture(captured.id!);
+      const providerCapture = await client.getCapture(captured.id!,expected.merchantId);
       const observation = await recordCaptureObservation(db(),p,order,providerCapture,expected.customId,p.paypal_capture_id ? "RECOVERY" : "CAPTURE",undefined,cfg.AUDIT_HMAC_KEY);
       return json({ status: observation.status, captureId: observation.captureId });
     } catch (error) { return fail(error instanceof Error ? error.message : "PayPal capture failed", 502); }
   }
   if (action === "sync_payment") {
-    if (userRole !== "client" || !p.paypal_order_id || p.status !== "APPROVED") return fail("No order is available to reconcile", 409);
+    if (userRole !== "client" || (!p.paypal_order_id && !p.payment_request_id) || p.status !== "APPROVED") return fail("No payment request is available to reconcile", 409);
     try {
-      const receipt = await requireApprovalReceipt(db(),p,cfg.AUDIT_HMAC_KEY);
-      const client = paypal();
-      const expected = paymentExpectation(p,orderCustomId(receipt));
-      const order = await client.getOrder(p.paypal_order_id);
-      const captured = orderCapture(order,expected);
-      if (!captured) return fail("No matching capture is available to reconcile", 409);
-      const providerCapture = await client.getCapture(captured.id!);
-      const observation = await recordCaptureObservation(db(),p,order,providerCapture,expected.customId,"SYNC",undefined,cfg.AUDIT_HMAC_KEY);
-      return json({ status: observation.status, captureId: observation.captureId });
+      const result = await reconcileProject(db(),p,paypal(),cfg.AUDIT_HMAC_KEY,"MANUAL");
+      if (result.outcome === "ERROR" || result.outcome.endsWith("REVIEW_REQUIRED"))
+        return fail(`PayPal reconciliation requires review: ${result.outcome}`,409);
+      return json(result);
     } catch (error) { return fail(error instanceof Error ? error.message : "Payment reconciliation failed", 502); }
   }
   return fail("Unknown action");
