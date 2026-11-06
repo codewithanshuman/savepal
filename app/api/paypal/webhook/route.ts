@@ -1,52 +1,53 @@
 import { env } from "cloudflare:workers";
-import { captureMatches, canApplyPaymentStatus, providerPaymentStatus } from "../../../../lib/assurance";
-import { appendAudit } from "../../../../lib/audit";
+import { requireApprovalReceipt, type StoredApprovalProject } from "../../../../lib/approval-store";
+import { orderCustomId } from "../../../../lib/approval-receipt";
+import { recordCaptureObservation, type PaymentProject } from "../../../../lib/payment-store";
+import { PayPalSandbox, orderMatches, safeProviderId } from "../../../../lib/paypal-assurance";
 
 export const runtime = "edge";
 const cfg = env as Cloudflare.Env & { PAYPAL_CLIENT_ID?: string; PAYPAL_CLIENT_SECRET?: string; PAYPAL_WEBHOOK_ID?: string; AUDIT_HMAC_KEY?: string };
+type WebhookEvent = { id?: string; event_type?: string; resource?: { id?: string } };
+type WebhookProject = StoredApprovalProject & PaymentProject;
+const acceptedEvents = new Set([
+  "PAYMENT.CAPTURE.COMPLETED", "PAYMENT.CAPTURE.PENDING", "PAYMENT.CAPTURE.DENIED",
+  "PAYMENT.CAPTURE.DECLINED", "PAYMENT.CAPTURE.REFUNDED", "PAYMENT.CAPTURE.PARTIALLY_REFUNDED",
+]);
 
 export async function POST(request: Request) {
-  if (!env.DB || !cfg.PAYPAL_CLIENT_ID || !cfg.PAYPAL_CLIENT_SECRET || !cfg.PAYPAL_WEBHOOK_ID) return Response.json({ error: "Webhook is not configured" }, { status: 503 });
-  const headers = request.headers;
-  const transmissionId = headers.get("paypal-transmission-id");
-  const transmissionTime = headers.get("paypal-transmission-time");
-  const certUrl = headers.get("paypal-cert-url");
-  const authAlgo = headers.get("paypal-auth-algo");
-  const transmissionSig = headers.get("paypal-transmission-sig");
-  if (!transmissionId || !transmissionTime || !certUrl || !authAlgo || !transmissionSig) return Response.json({ error: "Missing PayPal headers" }, { status: 400 });
-  let body: { id?: string; event_type?: string; resource?: { id?: string } };
-  try { body = await request.json() as typeof body; } catch { return Response.json({ error: "Invalid JSON" }, { status: 400 }); }
-  if (!body.id || !body.event_type || !body.resource?.id) return Response.json({ error: "Invalid event" }, { status: 400 });
+  if (!env.DB || !cfg.PAYPAL_CLIENT_ID || !cfg.PAYPAL_CLIENT_SECRET || !cfg.PAYPAL_WEBHOOK_ID)
+    return Response.json({ error: "Webhook is not configured" }, { status: 503 });
+  const raw = await request.text();
+  if (raw.length > 100_000) return Response.json({ error: "Event is too large" }, { status: 413 });
+  let body: WebhookEvent;
+  try { body = JSON.parse(raw) as WebhookEvent; }
+  catch { return Response.json({ error: "Invalid JSON" }, { status: 400 }); }
+  if (!safeProviderId(body.id) || !body.event_type || !safeProviderId(body.resource?.id))
+    return Response.json({ error: "Invalid event" }, { status: 400 });
+  const client = new PayPalSandbox(cfg.PAYPAL_CLIENT_ID,cfg.PAYPAL_CLIENT_SECRET);
   try {
-    const auth = btoa(`${cfg.PAYPAL_CLIENT_ID}:${cfg.PAYPAL_CLIENT_SECRET}`);
-    const tokenRes = await fetch("https://api-m.sandbox.paypal.com/v1/oauth2/token", { method: "POST", headers: { Authorization: `Basic ${auth}`, "Content-Type": "application/x-www-form-urlencoded" }, body: "grant_type=client_credentials" });
-    if (!tokenRes.ok) throw new Error("PayPal authentication failed");
-    const token = ((await tokenRes.json()) as { access_token: string }).access_token;
-    const verification = await fetch("https://api-m.sandbox.paypal.com/v1/notifications/verify-webhook-signature", {
-      method: "POST",
-      headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
-      body: JSON.stringify({ transmission_id: transmissionId, transmission_time: transmissionTime, cert_url: certUrl, auth_algo: authAlgo, transmission_sig: transmissionSig, webhook_id: cfg.PAYPAL_WEBHOOK_ID, webhook_event: body }),
-    });
-    if (!verification.ok || ((await verification.json()) as { verification_status: string }).verification_status !== "SUCCESS") return Response.json({ error: "Invalid signature" }, { status: 401 });
-    const match = await env.DB.prepare("SELECT id, payment_status, amount_cents, currency FROM projects WHERE paypal_capture_id = ?")
-      .bind(body.resource.id).first<{ id: string; payment_status: string; amount_cents: number; currency: string }>();
+    if (!await client.verifyWebhook(request.headers,body,cfg.PAYPAL_WEBHOOK_ID))
+      return Response.json({ error: "Invalid signature" }, { status: 401 });
+    if (!acceptedEvents.has(body.event_type)) return Response.json({ ok: true, ignored: true });
+    // A webhook can arrive before the capture POST response is stored locally.
+    const capture = await client.getCapture(body.resource.id);
+    if (capture.id !== body.resource.id) throw new Error("PayPal returned a different capture");
+    const relatedOrder = capture.supplementary_data?.related_ids?.order_id;
+    const match = await env.DB.prepare("SELECT * FROM projects WHERE paypal_capture_id=? OR paypal_order_id=? LIMIT 1")
+      .bind(capture.id,relatedOrder || "").first<WebhookProject>();
     if (!match) return Response.json({ ok: true, ignored: true });
-    if (!["PAYMENT.CAPTURE.COMPLETED","PAYMENT.CAPTURE.PENDING","PAYMENT.CAPTURE.DENIED"].includes(body.event_type)) return Response.json({ ok: true, ignored: true });
-    const captureResponse = await fetch(`https://api-m.sandbox.paypal.com/v2/payments/captures/${encodeURIComponent(body.resource.id)}`, { headers: { Authorization: `Bearer ${token}` } });
-    if (!captureResponse.ok) throw new Error("Capture lookup failed");
-    const capture = await captureResponse.json() as { id?: string; status?: string; amount?: { value?: string; currency_code?: string } };
-    if (!captureMatches(capture,match.amount_cents,match.currency,body.resource.id)) return Response.json({ error: "Capture does not match milestone" }, { status: 409 });
-    const status = providerPaymentStatus(capture.status);
-    if (body.event_type === "PAYMENT.CAPTURE.COMPLETED" && status !== "COMPLETED") throw new Error("Provider has not confirmed completion yet");
-    await env.DB.prepare("INSERT OR IGNORE INTO paypal_events (id, project_id, event_type, received_at) VALUES (?, ?, ?, ?)")
+    if (!match.paypal_order_id) throw new Error("Milestone has no PayPal order");
+    const receipt = await requireApprovalReceipt(env.DB,match,cfg.AUDIT_HMAC_KEY);
+    const order = await client.getOrder(match.paypal_order_id);
+    if (!orderMatches(order,{
+      projectId: match.id, orderId: match.paypal_order_id, customId: orderCustomId(receipt),
+      amountCents: match.amount_cents, currency: match.currency,
+    })) throw new Error("PayPal order does not match approval");
+    const observation = await recordCaptureObservation(
+      env.DB,match,order,capture,orderCustomId(receipt),"WEBHOOK",body.id,cfg.AUDIT_HMAC_KEY,body,
+    );
+    await env.DB.prepare("INSERT OR IGNORE INTO paypal_events (id,project_id,event_type,received_at) VALUES (?,?,?,?)")
       .bind(body.id,match.id,body.event_type,new Date().toISOString()).run();
-    if (canApplyPaymentStatus(match.payment_status,status) && match.payment_status !== status) {
-      const changed = await env.DB.prepare("UPDATE projects SET payment_status=?,updated_at=? WHERE id=? AND paypal_capture_id=? AND payment_status=?")
-        .bind(status,new Date().toISOString(),match.id,body.resource.id,match.payment_status).run();
-      if (!changed.meta.changes) throw new Error("Concurrent payment update");
-      await appendAudit(env.DB,match.id,"PayPal",body.event_type,`Signature and capture verified for sandbox event ${body.id}; provider status ${capture.status}`,cfg.AUDIT_HMAC_KEY);
-    }
-    return Response.json({ ok: true });
+    return Response.json({ ok: true, status: observation.status });
   } catch {
     return Response.json({ error: "Temporary webhook failure" }, { status: 502 });
   }

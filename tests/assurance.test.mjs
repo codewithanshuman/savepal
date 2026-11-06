@@ -49,9 +49,14 @@ test("capture requires exact ID, amount, and currency", () => {
 test("provider updates cannot demote a completed payment", () => {
   assert.equal(providerPaymentStatus("COMPLETED"),"COMPLETED");
   assert.equal(providerPaymentStatus("DENIED"),"FAILED");
+  assert.equal(providerPaymentStatus("REFUNDED"),"REFUNDED");
+  assert.equal(providerPaymentStatus("PARTIALLY_REFUNDED"),"PARTIALLY_REFUNDED");
   assert.equal(providerPaymentStatus("SOMETHING_NEW"),"PENDING");
   assert.equal(canApplyPaymentStatus("COMPLETED","PENDING"),false);
   assert.equal(canApplyPaymentStatus("COMPLETED","FAILED"),false);
   assert.equal(canApplyPaymentStatus("PENDING","COMPLETED"),true);
   assert.equal(canApplyPaymentStatus("FAILED","PENDING"),false);
+  assert.equal(canApplyPaymentStatus("COMPLETED","REFUNDED"),true);
+  assert.equal(canApplyPaymentStatus("PARTIALLY_REFUNDED","REFUNDED"),true);
+  assert.equal(canApplyPaymentStatus("REFUNDED","COMPLETED"),false);
 });

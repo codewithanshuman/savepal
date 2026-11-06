@@ -4,7 +4,7 @@ export const MAX_HTML_BYTES = 100_000;
 export type Criterion = { label: string; kind: "reachable" | "contains" | "manual"; needle?: string };
 export type Finding = { label: string; status: "VERIFIED" | "FAILED" | "INCONCLUSIVE"; explanation: string; check: string };
 export type WebsiteResult = { status: number; body: string; contentType: string; truncated: boolean; error?: string };
-export type PaymentStatus = "NOT_STARTED" | "PENDING" | "COMPLETED" | "FAILED";
+export type PaymentStatus = "NOT_STARTED" | "PENDING" | "COMPLETED" | "FAILED" | "PARTIALLY_REFUNDED" | "REFUNDED";
 
 export function parseUsdCents(raw: unknown): number | null {
   const value = typeof raw === "number" ? String(raw) : raw;
@@ -73,16 +73,20 @@ export function captureMatches(
 }
 
 export function providerPaymentStatus(status: string | undefined): PaymentStatus {
+  if (status === "REFUNDED") return "REFUNDED";
+  if (status === "PARTIALLY_REFUNDED") return "PARTIALLY_REFUNDED";
   if (status === "COMPLETED") return "COMPLETED";
   if (status === "DENIED" || status === "DECLINED" || status === "FAILED") return "FAILED";
   return "PENDING";
 }
 
 export function canApplyPaymentStatus(current: string, incoming: PaymentStatus): boolean {
-  if (current === "COMPLETED") return incoming === "COMPLETED";
-  if (current === "FAILED") return incoming === "FAILED" || incoming === "COMPLETED";
-  if (current === "NOT_STARTED") return incoming !== "COMPLETED";
-  return true;
+  if (current === "REFUNDED") return incoming === "REFUNDED";
+  if (current === "PARTIALLY_REFUNDED") return incoming === "PARTIALLY_REFUNDED" || incoming === "REFUNDED";
+  if (current === "COMPLETED") return incoming === "COMPLETED" || incoming === "PARTIALLY_REFUNDED" || incoming === "REFUNDED";
+  if (current === "FAILED") return incoming === "FAILED" || incoming === "COMPLETED" || incoming === "PARTIALLY_REFUNDED" || incoming === "REFUNDED";
+  if (current === "NOT_STARTED") return incoming === "NOT_STARTED" || incoming === "PENDING";
+  return incoming !== "NOT_STARTED";
 }
 
 export async function readBoundedHtml(response: Response): Promise<{ body: string; truncated: boolean }> {

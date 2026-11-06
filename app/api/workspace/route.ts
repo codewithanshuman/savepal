@@ -1,13 +1,17 @@
 import { env } from "cloudflare:workers";
 import { getChatGPTUser } from "../../chatgpt-auth";
-import { CHECKER_VERSION, captureMatches, canApplyPaymentStatus, parseUsdCents, providerPaymentStatus, readBoundedHtml, safeWebsiteUrl, type Criterion, type Finding, type WebsiteResult } from "../../../lib/assurance";
+import { CHECKER_VERSION, parseUsdCents, readBoundedHtml, safeWebsiteUrl, type Criterion, type Finding, type WebsiteResult } from "../../../lib/assurance";
 import { appendAudit, verifyAudit } from "../../../lib/audit";
 import { captureWebsite, evaluateSnapshot, sha256, snapshotManifest, validateSnapshot } from "../../../lib/website-evidence";
 import { reviewWithAi } from "../../../lib/ai-verification";
+import { approveWithReceipt, requireApprovalReceipt, type StoredApprovalProject } from "../../../lib/approval-store";
+import { orderCustomId } from "../../../lib/approval-receipt";
+import { PayPalSandbox, orderCapture, orderMatches, retrySafe, safeProviderId, type ExpectedPayment } from "../../../lib/paypal-assurance";
+import { recordCaptureObservation } from "../../../lib/payment-store";
 
 export const runtime = "edge";
 
-type Project = {
+type Project = StoredApprovalProject & {
   id: string; client_id: string; client_email: string; freelancer_email: string;
   title: string; description: string; amount_cents: number; currency: string;
   criteria_json: string; status: string; evidence_url: string | null;
@@ -15,7 +19,9 @@ type Project = {
   findings_json: string | null; evaluated_at: string | null; decision_reason: string | null;
   paypal_order_id: string | null; paypal_capture_id: string | null;
   payment_status: string; payment_request_id: string | null;
-  created_at: string; updated_at: string; latest_run_id: string | null; current_submission_id: string | null;
+  payment_order_requested_at: string | null; payment_capture_request_id: string | null;
+  payment_capture_requested_at: string | null;
+  created_at: string; updated_at: string;
 };
 type EvidenceSubmission = { id: string; project_id: string; submission_hash: string; snapshot_hash: string; snapshot_key: string; manifest_json: string; created_at: string };
 
@@ -48,6 +54,7 @@ function view(p: Project, user: { userId: string; email: string }) {
     criteria: JSON.parse(p.criteria_json) as Criterion[],
     findings: p.findings_json ? JSON.parse(p.findings_json) as Finding[] : null,
     criteria_json: undefined, findings_json: undefined, payment_request_id: undefined,
+    payment_capture_request_id: undefined, audit_head_hash: undefined,
   };
 }
 
@@ -62,7 +69,9 @@ export async function GET(request: Request) {
     const auditIntegrity = await verifyAudit(db(),id,cfg.AUDIT_HMAC_KEY);
     const submissions = await db().prepare("SELECT id,submission_hash,snapshot_hash,manifest_json,created_at FROM evidence_submissions WHERE project_id=? ORDER BY created_at DESC LIMIT 20").bind(id).all<Pick<EvidenceSubmission,"id"|"submission_hash"|"snapshot_hash"|"manifest_json"|"created_at">>();
     const verificationRun = p.latest_run_id ? await db().prepare("SELECT id,submission_id,snapshot_hash,checker_version,model,started_at,completed_at,state,website_status,website_body_hash,website_truncated,findings_json,ai_note,coverage_json FROM verification_runs WHERE id=? AND project_id=?").bind(p.latest_run_id,id).first() : null;
-    return json({ project: view(p, user), audit: audit.results, auditIntegrity, evidenceHistory: submissions.results.map(s => ({ ...s, manifest: JSON.parse(s.manifest_json), manifest_json: undefined })), verificationRun });
+    const approvalReceipt = p.approval_receipt_id ? await db().prepare("SELECT * FROM approval_receipts WHERE id=? AND project_id=?").bind(p.approval_receipt_id,id).first() : null;
+    const paymentObservations = await db().prepare("SELECT id,source,provider_event_id,order_id,capture_id,provider_status,projected_status,amount_cents,currency,payload_hash,observed_at FROM payment_observations WHERE project_id=? ORDER BY observed_at DESC LIMIT 30").bind(id).all();
+    return json({ project: view(p, user), audit: audit.results, auditIntegrity, evidenceHistory: submissions.results.map(s => ({ ...s, manifest: JSON.parse(s.manifest_json), manifest_json: undefined })), verificationRun, approvalReceipt, paymentObservations: paymentObservations.results });
   }
   const rows = await db().prepare("SELECT * FROM projects WHERE client_id = ? OR lower(freelancer_email) = ? ORDER BY created_at DESC")
     .bind(user.userId, user.email.toLowerCase()).all<Project>();
@@ -86,14 +95,13 @@ async function storeSnapshot(projectId: string, submissionId: string, url: strin
   await env.BUCKET.put(key,raw,{ httpMetadata: { contentType: "application/json" } });
   return { snapshot, snapshotHash, key };
 }
-async function paypalToken() {
+function paypal() {
   if (!cfg.PAYPAL_CLIENT_ID || !cfg.PAYPAL_CLIENT_SECRET) throw new Error("PayPal sandbox credentials are not configured");
-  const basic = btoa(`${cfg.PAYPAL_CLIENT_ID}:${cfg.PAYPAL_CLIENT_SECRET}`);
-  const res = await fetch("https://api-m.sandbox.paypal.com/v1/oauth2/token", {
-    method: "POST", headers: { Authorization: `Basic ${basic}`, "Content-Type": "application/x-www-form-urlencoded" }, body: "grant_type=client_credentials",
-  });
-  if (!res.ok) throw new Error("PayPal authentication failed");
-  return ((await res.json()) as { access_token: string }).access_token;
+  return new PayPalSandbox(cfg.PAYPAL_CLIENT_ID,cfg.PAYPAL_CLIENT_SECRET);
+}
+function paymentExpectation(p: Project, customId: string): ExpectedPayment {
+  return { projectId: p.id, orderId: p.paypal_order_id || undefined, captureId: p.paypal_capture_id || undefined,
+    customId, amountCents: p.amount_cents, currency: p.currency };
 }
 
 export async function POST(request: Request) {
@@ -241,78 +249,98 @@ export async function POST(request: Request) {
     const findings = p.findings_json ? JSON.parse(p.findings_json) as Finding[] : [];
     if (!p.latest_run_id || findings.length === 0) return fail("A completed verification run is required", 409);
     if (action === "approve" && findings.some(f => f.status !== "VERIFIED") && reason.length < 5) return fail("Explain why you are approving an inconclusive or failed check");
-    const status = action === "approve" ? "APPROVED" : "REVISION_REQUESTED";
-    const changed = await db().prepare("UPDATE projects SET status=?,decision_reason=?,updated_at=? WHERE id=? AND status='REVIEW'").bind(status,reason || "Client reviewed the evidence and approved.",now(),id).run();
+    if (action === "approve") {
+      try {
+        const receipt = await approveWithReceipt(db(),p,user.email,reason || "Client reviewed the evidence and approved.",cfg.AUDIT_HMAC_KEY);
+        return json({ ok: true, approvalReceiptId: receipt.id, approvalHash: receipt.receipt_hash });
+      } catch (error) {
+        return fail(error instanceof Error ? error.message : "Approval could not be recorded", 409);
+      }
+    }
+    const changed = await db().prepare("UPDATE projects SET status='REVISION_REQUESTED',decision_reason=?,updated_at=? WHERE id=? AND status='REVIEW' AND approval_receipt_id IS NULL")
+      .bind(reason,now(),id).run();
     if (!changed.meta.changes) return fail("Milestone state changed; refresh and decide again", 409);
-    await event(id,user.email,action === "approve" ? "CLIENT_APPROVED" : "REVISION_REQUESTED",reason || "Client reviewed the evidence and approved.");
+    await event(id,user.email,"REVISION_REQUESTED",reason);
     return json({ ok: true });
   }
   if (action === "create_order") {
     if (userRole !== "client" || p.status !== "APPROVED") return fail("Client approval is required", 403);
-    if (p.payment_status === "COMPLETED") return fail("This milestone is already paid", 409);
+    if (["COMPLETED","PARTIALLY_REFUNDED","REFUNDED"].includes(p.payment_status)) return fail("This milestone already has a captured payment", 409);
     if (p.payment_status === "FAILED") return fail("This attempt failed; reconcile it before another payment", 409);
-    if (p.paypal_order_id) return json({ orderId: p.paypal_order_id });
     try {
-      const token = await paypalToken();
-      const requestId = p.payment_request_id || `${id}-create`;
-      const reserved = await db().prepare("UPDATE projects SET payment_request_id=?,payment_status='PENDING',updated_at=? WHERE id=? AND status='APPROVED' AND payment_status NOT IN ('COMPLETED','FAILED') AND paypal_order_id IS NULL")
-        .bind(requestId,now(),id).run();
+      const receipt = await requireApprovalReceipt(db(),p,cfg.AUDIT_HMAC_KEY);
+      const client = paypal();
+      const expected = paymentExpectation(p,orderCustomId(receipt));
+      if (p.paypal_order_id) {
+        const existing = await client.getOrder(p.paypal_order_id);
+        if (!orderMatches(existing,expected)) return fail("PayPal order does not match the approval receipt", 409);
+        const recorded = await db().prepare("SELECT id FROM audit_events WHERE project_id=? AND type IN ('PAYPAL_ORDER_CREATED','PAYPAL_ORDER_RECOVERED') AND detail LIKE ? LIMIT 1")
+          .bind(id,`%${p.paypal_order_id}%`).first();
+        if (!recorded) await event(id,user.email,"PAYPAL_ORDER_RECOVERED",`Sandbox order ${p.paypal_order_id}; approval ${receipt.receipt_hash}; recovered audit record.`);
+        return json({ orderId: p.paypal_order_id });
+      }
+      if (p.payment_request_id && !retrySafe(p.payment_order_requested_at)) return fail("Order outcome is uncertain after the safe retry window; reconcile with PayPal before another attempt", 409);
+      const requestId = p.payment_request_id || crypto.randomUUID();
+      const requestedAt = p.payment_order_requested_at || now();
+      const reserved = await db().prepare("UPDATE projects SET payment_request_id=COALESCE(payment_request_id,?),payment_order_requested_at=COALESCE(payment_order_requested_at,?),payment_status='PENDING',updated_at=? WHERE id=? AND status='APPROVED' AND payment_status NOT IN ('COMPLETED','FAILED','PARTIALLY_REFUNDED','REFUNDED') AND paypal_order_id IS NULL AND (payment_request_id IS NULL OR payment_request_id=?) AND approval_receipt_id=?")
+        .bind(requestId,requestedAt,now(),id,requestId,receipt.id).run();
       if (!reserved.meta.changes) return fail("Payment state changed; refresh before checkout", 409);
-      const response = await fetch("https://api-m.sandbox.paypal.com/v2/checkout/orders", {
-        method: "POST",
-        headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json", "PayPal-Request-Id": requestId },
-        body: JSON.stringify({ intent: "CAPTURE", purchase_units: [{ reference_id: id, custom_id: id, amount: { currency_code: p.currency, value: (p.amount_cents / 100).toFixed(2) } }] }),
-      });
-      const data = await response.json() as { id?: string; message?: string };
-      if (!response.ok || !data.id) throw new Error(data.message || "PayPal order creation failed");
-      const stored = await db().prepare("UPDATE projects SET paypal_order_id=?,updated_at=? WHERE id=? AND paypal_order_id IS NULL AND status='APPROVED'")
-        .bind(data.id,now(),id).run();
-      if (stored.meta.changes) await event(id,user.email,"PAYPAL_ORDER_CREATED",`Sandbox order ${data.id}`);
+      const created = await client.createOrder(expected,requestId);
+      if (!safeProviderId(created.id)) throw new Error("PayPal returned an invalid order ID");
+      const stored = await db().prepare("UPDATE projects SET paypal_order_id=?,updated_at=? WHERE id=? AND paypal_order_id IS NULL AND status='APPROVED' AND approval_receipt_id=? AND payment_request_id=?")
+        .bind(created.id,now(),id,receipt.id,requestId).run();
       const latest = await project(id);
       if (!latest?.paypal_order_id) throw new Error("Order was created but could not be recorded; retry with the same idempotency key");
-      if (latest.paypal_order_id !== data.id) throw new Error("PayPal returned a conflicting order ID");
+      if (latest.paypal_order_id !== created.id) throw new Error("PayPal returned a conflicting order ID");
+      const providerOrder = await client.getOrder(created.id);
+      if (!orderMatches(providerOrder,{...expected,orderId:created.id})) throw new Error("PayPal order amount, reference, or approval binding does not match");
+      if (stored.meta.changes) await event(id,user.email,"PAYPAL_ORDER_CREATED",`Sandbox order ${created.id}; approval ${receipt.receipt_hash}; request ${requestId}`);
       return json({ orderId: latest.paypal_order_id });
     } catch (error) { return fail(error instanceof Error ? error.message : "PayPal request failed", 502); }
   }
   if (action === "capture_order") {
     if (userRole !== "client" || p.status !== "APPROVED" || !p.paypal_order_id || String(input.orderId) !== p.paypal_order_id) return fail("Order does not match the approved milestone", 403);
-    if (p.payment_status === "COMPLETED") return json({ status: "COMPLETED", captureId: p.paypal_capture_id });
     try {
-      const token = await paypalToken();
-      const response = await fetch(`https://api-m.sandbox.paypal.com/v2/checkout/orders/${encodeURIComponent(p.paypal_order_id)}/capture`, {
-        method: "POST", headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json", "PayPal-Request-Id": `${id}-capture` }, body: "{}",
-      });
-      const data = await response.json() as { status?: string; purchase_units?: Array<{ payments?: { captures?: Array<{ id: string; status: string; amount?: { value: string; currency_code: string } }> } }> };
-      const capture = data.purchase_units?.[0]?.payments?.captures?.[0];
-      if (!response.ok || !capture) throw new Error("PayPal did not return a capture");
-      if (!captureMatches(capture,p.amount_cents,p.currency)) throw new Error("PayPal capture amount or currency mismatch");
-      const status = providerPaymentStatus(capture.status);
-      const stored = await db().prepare("UPDATE projects SET paypal_capture_id=?,payment_status=?,updated_at=? WHERE id=? AND paypal_order_id=? AND (paypal_capture_id IS NULL OR paypal_capture_id=?) AND payment_status!='COMPLETED'")
-        .bind(capture.id,status,now(),id,p.paypal_order_id,capture.id).run();
-      if (!stored.meta.changes) {
-        const latest = await project(id);
-        if (latest?.payment_status === "COMPLETED" && latest.paypal_capture_id === capture.id) return json({ status: "COMPLETED", captureId: capture.id });
-        throw new Error("Capture state changed; reconcile before retrying");
+      const receipt = await requireApprovalReceipt(db(),p,cfg.AUDIT_HMAC_KEY);
+      const client = paypal();
+      const expected = paymentExpectation(p,orderCustomId(receipt));
+      let order = await client.getOrder(p.paypal_order_id);
+      if (!orderMatches(order,expected)) return fail("PayPal order does not match the approval receipt", 409);
+      const providerCaptures = order.purchase_units?.[0]?.payments?.captures || [];
+      let captured = orderCapture(order,expected);
+      if (providerCaptures.length && !captured) return fail("PayPal returned a conflicting capture", 409);
+      if (!captured) {
+        if (p.paypal_capture_id) return fail("Stored capture is missing from PayPal order; reconcile before retrying", 409);
+        if (p.payment_capture_request_id && !retrySafe(p.payment_capture_requested_at)) return fail("Capture outcome is uncertain after the safe retry window; reconcile with PayPal before another attempt", 409);
+        const requestId = p.payment_capture_request_id || crypto.randomUUID();
+        const requestedAt = p.payment_capture_requested_at || now();
+        const reserved = await db().prepare("UPDATE projects SET payment_capture_request_id=COALESCE(payment_capture_request_id,?),payment_capture_requested_at=COALESCE(payment_capture_requested_at,?),updated_at=? WHERE id=? AND status='APPROVED' AND paypal_order_id=? AND paypal_capture_id IS NULL AND payment_status NOT IN ('COMPLETED','PARTIALLY_REFUNDED','REFUNDED') AND approval_receipt_id=? AND (payment_capture_request_id IS NULL OR payment_capture_request_id=?)")
+          .bind(requestId,requestedAt,now(),id,p.paypal_order_id,receipt.id,requestId).run();
+        if (!reserved.meta.changes) return fail("Capture state changed; reconcile before retrying", 409);
+        const result = await client.captureOrder(p.paypal_order_id,requestId);
+        if (result.id && result.id !== p.paypal_order_id) throw new Error("PayPal capture returned a different order ID");
+        order = await client.getOrder(p.paypal_order_id);
+        if (!orderMatches(order,expected)) throw new Error("PayPal order changed during capture");
+        captured = orderCapture(order,expected);
+        if (!captured) throw new Error("PayPal capture could not be confirmed from the order");
       }
-      await event(id,user.email,"PAYPAL_CAPTURE_RESULT",`Sandbox capture ${capture.id}: ${capture.status}`);
-      return json({ status, captureId: capture.id });
+      const providerCapture = await client.getCapture(captured.id!);
+      const observation = await recordCaptureObservation(db(),p,order,providerCapture,expected.customId,p.paypal_capture_id ? "RECOVERY" : "CAPTURE",undefined,cfg.AUDIT_HMAC_KEY);
+      return json({ status: observation.status, captureId: observation.captureId });
     } catch (error) { return fail(error instanceof Error ? error.message : "PayPal capture failed", 502); }
   }
   if (action === "sync_payment") {
-    if (userRole !== "client" || !p.paypal_capture_id || p.status !== "APPROVED") return fail("No capture is available to reconcile", 409);
+    if (userRole !== "client" || !p.paypal_order_id || p.status !== "APPROVED") return fail("No order is available to reconcile", 409);
     try {
-      const token = await paypalToken();
-      const response = await fetch(`https://api-m.sandbox.paypal.com/v2/payments/captures/${encodeURIComponent(p.paypal_capture_id)}`, { headers: { Authorization: `Bearer ${token}` } });
-      if (!response.ok) throw new Error("PayPal status lookup failed");
-      const capture = await response.json() as { id?: string; status?: string; amount?: { value?: string; currency_code?: string } };
-      if (!captureMatches(capture,p.amount_cents,p.currency,p.paypal_capture_id)) throw new Error("PayPal capture does not match this milestone");
-      const status = providerPaymentStatus(capture.status);
-      if (!canApplyPaymentStatus(p.payment_status,status)) return json({ status: p.payment_status });
-      const changed = await db().prepare("UPDATE projects SET payment_status=?,updated_at=? WHERE id=? AND paypal_capture_id=? AND payment_status=?")
-        .bind(status,now(),id,p.paypal_capture_id,p.payment_status).run();
-      if (!changed.meta.changes) return fail("Payment state changed; refresh and reconcile again", 409);
-      await event(id,user.email,"PAYMENT_RECONCILED",`Sandbox capture ${capture.id}: ${capture.status}`);
-      return json({ status });
+      const receipt = await requireApprovalReceipt(db(),p,cfg.AUDIT_HMAC_KEY);
+      const client = paypal();
+      const expected = paymentExpectation(p,orderCustomId(receipt));
+      const order = await client.getOrder(p.paypal_order_id);
+      const captured = orderCapture(order,expected);
+      if (!captured) return fail("No matching capture is available to reconcile", 409);
+      const providerCapture = await client.getCapture(captured.id!);
+      const observation = await recordCaptureObservation(db(),p,order,providerCapture,expected.customId,"SYNC",undefined,cfg.AUDIT_HMAC_KEY);
+      return json({ status: observation.status, captureId: observation.captureId });
     } catch (error) { return fail(error instanceof Error ? error.message : "Payment reconciliation failed", 502); }
   }
   return fail("Unknown action");

@@ -13,8 +13,9 @@ SavePal links a locked website milestone, evidence, objective verification, a cl
 - Versioned verification runs bound to the exact submission and snapshot hashes, with crash recovery after five minutes
 - Append-only, per-agreement audit hash chains; optional HMAC key protects against database-only tampering
 - Optional structured OpenAI review of each criterion, with page IDs and quotes validated against submitted and live evidence. The model's assessments are advisory and cannot change objective results or authorize payment; input, output, model, and response hashes are retained with the run.
-- Client approval or revision request
-- PayPal sandbox order creation, buyer approval, capture, amount validation, stable idempotency keys, and verified webhook ingestion
+- Client approval or revision request, with an immutable receipt hashing the agreement, exact submission, verification findings, approver, reason, and amount
+- PayPal sandbox order creation bound to the approval receipt, buyer approval, capture, exact provider-side order and capture validation, and bounded idempotent retries
+- Provider reconciliation after ambiguous responses, webhook recovery of captures before local persistence, and append-only payment observations with webhook replay checks
 - Durable D1 storage
 - Conditional state transitions to reject concurrent approvals, resubmissions, and stale verification results
 
@@ -30,6 +31,7 @@ node --import ./scripts/sites-env.mjs ./node_modules/wrangler/bin/wrangler.js d1
 node --import ./scripts/sites-env.mjs ./node_modules/wrangler/bin/wrangler.js d1 execute DB --local --config dist/server/wrangler.json --persist-to .wrangler/state --file drizzle/0001_sharp_valeria_richards.sql
 node --import ./scripts/sites-env.mjs ./node_modules/wrangler/bin/wrangler.js d1 execute DB --local --config dist/server/wrangler.json --persist-to .wrangler/state --file drizzle/0002_clammy_baron_strucker.sql
 node --import ./scripts/sites-env.mjs ./node_modules/wrangler/bin/wrangler.js d1 execute DB --local --config dist/server/wrangler.json --persist-to .wrangler/state --file drizzle/0003_late_bloodscream.sql
+node --import ./scripts/sites-env.mjs ./node_modules/wrangler/bin/wrangler.js d1 execute DB --local --config dist/server/wrangler.json --persist-to .wrangler/state --file drizzle/0004_foamy_kate_bishop.sql
 npm run dev -- --port 5174
 ```
 
@@ -37,7 +39,7 @@ Open the printed local URL, then visit `/signin-with-chatgpt?return_to=/` for th
 
 ## Hosted configuration
 
-Set `PAYPAL_CLIENT_ID` (browser-safe), `PAYPAL_CLIENT_SECRET` (secret), and `PAYPAL_WEBHOOK_ID` (secret) in Sites runtime environment variables. Use a PayPal **sandbox** REST app. Register `https://YOUR-SITE/api/paypal/webhook` for capture completed, pending, and denied events. The app never calls PayPal live endpoints.
+Set `PAYPAL_CLIENT_ID` (browser-safe), `PAYPAL_CLIENT_SECRET` (secret), and `PAYPAL_WEBHOOK_ID` (secret) in Sites runtime environment variables. Use a PayPal **sandbox** REST app. Register `https://YOUR-SITE/api/paypal/webhook` for capture completed, pending, denied, declined, refunded, and partially refunded events. The app never calls PayPal live endpoints. Refund state advances from completed to partially refunded or refunded; the observation history retains each provider response.
 
 `OPENAI_API_KEY` is optional and must be a secret. `OPENAI_MODEL` defaults to `gpt-4o-mini`. When configured, bounded website text and freelancer notes are sent to the OpenAI Responses API for criterion-by-criterion review. Without the key, objective verification still works and manual checks remain inconclusive. AI review failure also leaves objective results intact.
 
@@ -59,7 +61,7 @@ The new hosted Site is private by default. The invited freelancer must be allowe
 
 This hackathon MVP focuses on one website milestone per agreement. Snapshot checks read up to six pages of server-returned HTML, bounded at 100 KB per page. They do not execute browser JavaScript, apply external CSS to determine visibility, simulate a mobile device, or prove a checkout flow. Structural signals and AI assessments guide human review; manual checks stay inconclusive. A site with more than six discovered pages has partial coverage, so missing text is inconclusive. Evidence is a private website snapshot plus notes, not uploaded files. Payment uses immediate sandbox capture after buyer approval, not escrow or a long-lived authorization hold. The app has no production payment mode.
 
-PayPal credentials and a separate sandbox buyer account are required for an end-to-end transaction test. Do not describe payment or AI integration as verified until that test is run.
+PayPal credentials and a separate sandbox buyer account are required for an end-to-end transaction test. The order and capture retry window is five hours from the first request; after that, the API requires reconciliation instead of blindly repeating a potentially charged operation. Do not describe payment or AI integration as verified until that test is run.
 
 Run `npm test` for deterministic domain checks. With the local preview running on port 5174 and migrations applied, run `tests/api-smoke.ps1`, `tests/evidence-smoke.ps1`, `tests/verification-smoke.ps1`, and `tests/payment-smoke.ps1` from PowerShell for synthetic agreement creation, permission rejection, a real snapshot submission, verification-run persistence, snapshot binding, audit integrity, and missing-credentials payment checks. These scripts write test data only to local D1 and R2. No real sandbox capture has been tested without credentials.
 
