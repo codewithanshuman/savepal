@@ -6,7 +6,6 @@ import { ArrowRight, Check, CircleDollarSign, Fingerprint, GitCompareArrows, Lin
 const nav = [
   { href: "#top", label: "Home" },
   { href: "#how", label: "How it works" },
-  { href: "#paypal", label: "PayPal" },
   { href: "#features", label: "Features" },
   { href: "#faq", label: "FAQ" },
 ];
