@@ -1,4 +1,4 @@
-import { integer, sqliteTable, text } from "drizzle-orm/sqlite-core";
+import { blob, integer, sqliteTable, text } from "drizzle-orm/sqlite-core";
 
 export const projects = sqliteTable("projects", {
   id: text("id").primaryKey(),
@@ -167,4 +167,44 @@ export const reconciliationAttempts = sqliteTable("reconciliation_attempts", {
   outcome: text("outcome").notNull(),
   detail: text("detail").notNull(),
   attemptedAt: text("attempted_at").notNull(),
+});
+
+/** Database fallback for private evidence when no R2 bucket is bound. */
+export const evidenceObjects = sqliteTable("evidence_objects", {
+  key: text("key").primaryKey(),
+  contentType: text("content_type").notNull(),
+  body: blob("body").notNull(),
+  size: integer("size").notNull(),
+  createdAt: text("created_at").notNull(),
+});
+
+/** An AI inspector crew run over one submission. Advisory only: it never approves or pays. */
+export const crewRuns = sqliteTable("crew_runs", {
+  id: text("id").primaryKey(),
+  projectId: text("project_id").notNull(),
+  submissionId: text("submission_id").notNull(),
+  status: text("status").notNull(),
+  model: text("model").notNull(),
+  steps: integer("steps").notNull().default(0),
+  pagesRead: integer("pages_read").notNull().default(0),
+  messagesJson: text("messages_json").notNull(),
+  reportJson: text("report_json"),
+  stepLockUntil: text("step_lock_until"),
+  startedBy: text("started_by").notNull(),
+  startedAt: text("started_at").notNull(),
+  updatedAt: text("updated_at").notNull(),
+  completedAt: text("completed_at"),
+});
+
+/** What the crew did, in order: the live log the realm animates from. */
+export const crewEvents = sqliteTable("crew_events", {
+  id: integer("id").primaryKey({ autoIncrement: true }),
+  runId: text("run_id").notNull(),
+  projectId: text("project_id").notNull(),
+  kind: text("kind").notNull(),
+  pageUrl: text("page_url"),
+  criterionIndex: integer("criterion_index"),
+  verdict: text("verdict"),
+  text: text("text").notNull(),
+  createdAt: text("created_at").notNull(),
 });

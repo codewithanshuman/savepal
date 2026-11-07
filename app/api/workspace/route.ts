@@ -5,6 +5,7 @@ import { approvalViolation, decisionGate, parseMaxRevisions, revisionAllowance }
 import { revisionHistory } from "../../../lib/revision-diff";
 import { consentState, fundingCustomId, termsFingerprint, termsHash } from "../../../lib/terms-consent";
 import { canFund, canRelease, fundsSecured, isHold, voidAllowed } from "../../../lib/funding";
+import { CrewRateLimited, DEFAULT_GROQ_MODEL, crewStep, finalizeFindings, initialCrewState, type CrewEvent, type CrewState } from "../../../lib/crew";
 import { findingConfidence, type AdvancedFinding } from "../../../lib/website-evidence";
 import { appendAudit, verifyAudit } from "../../../lib/audit";
 import { captureWebsite, evaluateSnapshot, sha256, snapshotManifest, validateSnapshot } from "../../../lib/website-evidence";
@@ -18,7 +19,12 @@ import { beginSellerOnboarding, requireReadySeller } from "../../../lib/seller-o
 import { captureRenderedPage } from "../../../lib/browser-evidence";
 import { reconcileProject } from "../../../lib/payment-reconciliation";
 
+import { evidenceStore } from "../../../lib/evidence-store";
+
 export const runtime = "edge";
+/** Private evidence: R2 when bound, otherwise the database fallback. */
+const hasStore = () => !!evidenceStore(env);
+const store = () => { const s = evidenceStore(env); if (!s) throw new Error("Private evidence storage is unavailable"); return s; };
 
 type Project = StoredApprovalProject & {
   id: string; client_id: string; client_email: string; freelancer_email: string;
@@ -45,7 +51,7 @@ const db = () => {
   if (!env.DB) throw new Error("Database is unavailable");
   return env.DB;
 };
-const cfg = env as Cloudflare.Env & { PAYPAL_CLIENT_ID?: string; PAYPAL_CLIENT_SECRET?: string; PAYPAL_MERCHANT_ID?: string; PAYPAL_PARTNER_MERCHANT_ID?: string; PAYPAL_PARTNER_BN_CODE?: string; SITE_ORIGIN?: string; OPENAI_API_KEY?: string; OPENAI_MODEL?: string; AUDIT_HMAC_KEY?: string; BROWSER_RUN_ACCOUNT_ID?: string; BROWSER_RUN_API_TOKEN?: string };
+const cfg = env as Cloudflare.Env & { PAYPAL_CLIENT_ID?: string; PAYPAL_CLIENT_SECRET?: string; PAYPAL_MERCHANT_ID?: string; PAYPAL_PARTNER_MERCHANT_ID?: string; PAYPAL_PARTNER_BN_CODE?: string; SITE_ORIGIN?: string; OPENAI_API_KEY?: string; OPENAI_MODEL?: string; AUDIT_HMAC_KEY?: string; BROWSER_RUN_ACCOUNT_ID?: string; BROWSER_RUN_API_TOKEN?: string; GROQ_API_KEY?: string; GROQ_MODEL?: string };
 const json = (data: unknown, status = 200) => Response.json(data, { status, headers: { "Cache-Control": "no-store" } });
 const now = () => new Date().toISOString();
 const fail = (message: string, status = 400) => json({ error: message }, status);
@@ -101,7 +107,18 @@ async function termsIntact(p: Project): Promise<string | null> {
 export async function GET(request: Request) {
   const user = await getUser();
   if (!user) return fail("Sign in is required", 401);
-  const id = new URL(request.url).searchParams.get("id");
+  const params = new URL(request.url).searchParams;
+  const id = params.get("id");
+  if (id && params.get("crew") === "1") {
+    // Live inspector feed for the realm: the latest run plus events after a cursor.
+    const p = await project(id);
+    if (!p || !role(p, user)) return fail("Agreement not found", 404);
+    const run = await db().prepare("SELECT id,submission_id,status,model,steps,pages_read,report_json,started_at,completed_at FROM crew_runs WHERE project_id=? ORDER BY started_at DESC LIMIT 1").bind(id)
+      .first<{ id: string; submission_id: string; status: string; model: string; steps: number; pages_read: number; report_json: string | null; started_at: string; completed_at: string | null }>();
+    const after = Math.max(0, Number(params.get("after")) || 0);
+    const events = run ? await db().prepare("SELECT id,kind,page_url,criterion_index,verdict,text,created_at FROM crew_events WHERE run_id=? AND id>? ORDER BY id ASC LIMIT 200").bind(run.id,after).all() : { results: [] };
+    return json({ run: run ? { ...run, report: run.report_json ? JSON.parse(run.report_json) : null, report_json: undefined, current: run.submission_id === p.current_submission_id } : null, events: events.results, crewReady: !!cfg.GROQ_API_KEY });
+  }
   if (id) {
     const p = await project(id);
     if (!p || !role(p, user)) return fail("Agreement not found", 404);
@@ -118,7 +135,7 @@ export async function GET(request: Request) {
   }
   const rows = await db().prepare("SELECT * FROM projects WHERE client_id = ? OR lower(freelancer_email) = ? ORDER BY created_at DESC")
     .bind(user.userId, user.email.toLowerCase()).all<Project>();
-  return json({ user: { name: user.displayName, email: user.email }, projects: await Promise.all(rows.results.map(p => view(p, user))), paypalReady: paypalReady(), sellerOnboardingReady: !!(cfg.PAYPAL_CLIENT_ID && cfg.PAYPAL_CLIENT_SECRET && safeMerchantId(cfg.PAYPAL_PARTNER_MERCHANT_ID) && cfg.PAYPAL_PARTNER_BN_CODE), paymentMode: cfg.PAYPAL_PARTNER_MERCHANT_ID ? "SELLER" : "MERCHANT", paypalClientId: cfg.PAYPAL_CLIENT_ID || null, paypalPartnerBnCode: cfg.PAYPAL_PARTNER_BN_CODE || null, aiReady: !!cfg.OPENAI_API_KEY });
+  return json({ user: { name: user.displayName, email: user.email }, projects: await Promise.all(rows.results.map(p => view(p, user))), paypalReady: paypalReady(), sellerOnboardingReady: !!(cfg.PAYPAL_CLIENT_ID && cfg.PAYPAL_CLIENT_SECRET && safeMerchantId(cfg.PAYPAL_PARTNER_MERCHANT_ID) && cfg.PAYPAL_PARTNER_BN_CODE), paymentMode: cfg.PAYPAL_PARTNER_MERCHANT_ID ? "SELLER" : "MERCHANT", paypalClientId: cfg.PAYPAL_CLIENT_ID || null, paypalPartnerBnCode: cfg.PAYPAL_PARTNER_BN_CODE || null, aiReady: !!cfg.OPENAI_API_KEY, crewReady: !!cfg.GROQ_API_KEY });
 }
 
 async function inspectWebsite(url: string): Promise<WebsiteResult> {
@@ -130,17 +147,16 @@ async function inspectWebsite(url: string): Promise<WebsiteResult> {
   } catch { return { status: 0, body: "", contentType: "", truncated: false, error: "The website could not be reached within 8 seconds." }; }
 }
 async function storeSnapshot(projectId: string, submissionId: string, url: string, criteria: Criterion[]) {
-  if (!env.BUCKET) throw new Error("Private evidence storage is unavailable");
   const snapshot = await captureWebsite(url,fetch,criteria);
   if (cfg.BROWSER_RUN_ACCOUNT_ID && cfg.BROWSER_RUN_API_TOKEN) {
     const capture = await captureRenderedPage(url,`rendered/${projectId}/${submissionId}.png`,cfg.BROWSER_RUN_ACCOUNT_ID,cfg.BROWSER_RUN_API_TOKEN);
-    await env.BUCKET.put(capture.rendered.screenshotKey,capture.screenshot,{ httpMetadata: { contentType: "image/png" } });
+    await store().put(capture.rendered.screenshotKey,capture.screenshot,"image/png");
     snapshot.renderedRoot = capture.rendered;
   }
   const raw = JSON.stringify(snapshot);
   const snapshotHash = await sha256(raw);
   const key = `evidence/${projectId}/${submissionId}.json`;
-  await env.BUCKET.put(key,raw,{ httpMetadata: { contentType: "application/json" } });
+  await store().put(key,raw,"application/json");
   return { snapshot, snapshotHash, key };
 }
 function paypal() {
@@ -218,7 +234,7 @@ export async function POST(request: Request) {
     const url = safeWebsiteUrl(input.url);
     const notes = String(input.notes || "").trim().slice(0, 3000);
     if (!url || !notes) return fail("Provide a public HTTPS website URL and evidence notes");
-    if (!env.BUCKET) return fail("Private evidence storage is unavailable", 503);
+    if (!hasStore()) return fail("Private evidence storage is unavailable", 503);
     const submissionId = crypto.randomUUID(), time = now();
     let storedSnapshot: Awaited<ReturnType<typeof storeSnapshot>>;
     try { storedSnapshot = await storeSnapshot(id,submissionId,url,JSON.parse(p.criteria_json) as Criterion[]); }
@@ -233,11 +249,11 @@ export async function POST(request: Request) {
           .bind(submissionId,id,user.email,url,notes,hash,snapshotHash,key,JSON.stringify(snapshotManifest(snapshot)),time,id,submissionId),
       ]);
       if (!results[0].meta.changes || !results[1].meta.changes) {
-        await env.BUCKET.delete(key);
+        await store().delete(key);
         return fail("Milestone state changed; refresh and try again", 409);
       }
     } catch {
-      await env.BUCKET.delete(key).catch(() => {});
+      await store().delete(key).catch(() => {});
       return fail("Evidence snapshot could not be stored; no submission was accepted", 502);
     }
     await event(id,user.email,"EVIDENCE_SUBMITTED",`Submission ${submissionId}; snapshot SHA-256 ${snapshotHash}; ${snapshot.pages.length} pages captured.`);
@@ -245,7 +261,7 @@ export async function POST(request: Request) {
   }
   if (action === "verify") {
     if (userRole === "client" && p.status === "SUBMITTED" && !p.current_submission_id && p.evidence_url && p.evidence_notes && p.evidence_hash) {
-      if (!env.BUCKET) return fail("Private evidence storage is unavailable", 503);
+      if (!hasStore()) return fail("Private evidence storage is unavailable", 503);
       const legacyId = crypto.randomUUID(), migratedAt = now();
       let stored: Awaited<ReturnType<typeof storeSnapshot>>;
       try { stored = await storeSnapshot(id,legacyId,p.evidence_url,JSON.parse(p.criteria_json) as Criterion[]); }
@@ -258,11 +274,11 @@ export async function POST(request: Request) {
             .bind(legacyId,id,p.freelancer_email,p.evidence_url,p.evidence_notes,p.evidence_hash,stored.snapshotHash,stored.key,JSON.stringify(snapshotManifest(stored.snapshot)),migratedAt,id,legacyId),
         ]);
         if (!results[0].meta.changes || !results[1].meta.changes) {
-          await env.BUCKET.delete(stored.key);
+          await store().delete(stored.key);
           return fail("Evidence changed during migration; refresh and retry", 409);
         }
       } catch {
-        await env.BUCKET.delete(stored.key).catch(() => {});
+        await store().delete(stored.key).catch(() => {});
         return fail("Legacy evidence migration failed", 502);
       }
       await event(id,user.email,"LEGACY_EVIDENCE_SNAPSHOTTED",`Existing URL was snapshotted at verification time by ${user.email}; snapshot ${stored.snapshotHash}. Original evidence timestamp remains unchanged.`);
@@ -270,7 +286,7 @@ export async function POST(request: Request) {
       if (!p) return fail("Agreement disappeared during verification", 409);
     }
     if (userRole !== "client" || !p.evidence_url || !p.evidence_hash || !p.current_submission_id || !["SUBMITTED","EVALUATING"].includes(p.status)) return fail("A snapshotted submission is required", 409);
-    if (!env.BUCKET) return fail("Private evidence storage is unavailable", 503);
+    if (!hasStore()) return fail("Private evidence storage is unavailable", 503);
     const submission = await db().prepare("SELECT id,project_id,submission_hash,snapshot_hash,snapshot_key,manifest_json,created_at FROM evidence_submissions WHERE id=? AND project_id=?")
       .bind(p.current_submission_id,id).first<EvidenceSubmission>();
     if (!submission || submission.submission_hash !== p.evidence_hash) return fail("Evidence record does not match the milestone", 409);
@@ -282,7 +298,7 @@ export async function POST(request: Request) {
     try {
       await db().prepare("INSERT INTO verification_runs (id,project_id,evidence_hash,checker_version,model,started_at,state,submission_id,snapshot_hash) VALUES (?,?,?,?,?,?,?,?,?)")
         .bind(runId,id,p.evidence_hash,CHECKER_VERSION,cfg.OPENAI_API_KEY ? (cfg.OPENAI_MODEL || "gpt-4o-mini") : null,startedAt,"RUNNING",submission.id,submission.snapshot_hash).run();
-      const object = await env.BUCKET.get(submission.snapshot_key);
+      const object = await store().get(submission.snapshot_key);
       if (!object) throw new Error("Snapshot object missing");
       const raw = await object.text();
       const snapshot = await validateSnapshot(raw,submission.snapshot_hash,submission.manifest_json,p.evidence_url);
@@ -291,14 +307,14 @@ export async function POST(request: Request) {
       if (snapshot.renderedRoot) {
         if (!cfg.BROWSER_RUN_ACCOUNT_ID || !cfg.BROWSER_RUN_API_TOKEN) throw new Error("Browser evidence service is unavailable for replay");
         const capture = await captureRenderedPage(snapshot.rootUrl,`rendered/${id}/${runId}.png`,cfg.BROWSER_RUN_ACCOUNT_ID,cfg.BROWSER_RUN_API_TOKEN);
-        await env.BUCKET.put(capture.rendered.screenshotKey,capture.screenshot,{ httpMetadata: { contentType: "image/png" } });
+        await store().put(capture.rendered.screenshotKey,capture.screenshot,"image/png");
         livePages[0] = { ...livePages[0], renderedRoot: capture.rendered };
       }
       const criteria = JSON.parse(p.criteria_json) as Criterion[];
       const objectiveFindings = evaluateSnapshot(criteria,snapshot,livePages);
       const liveEvidence = await createVerificationInput(id,runId,submission.id,submission.snapshot_hash,p.criteria_json,livePages,now());
       const liveKey = `verification/${id}/${runId}.json`;
-      await env.BUCKET.put(liveKey,liveEvidence.raw,{ httpMetadata: { contentType: "application/json" } });
+      await store().put(liveKey,liveEvidence.raw,"application/json");
       const objectiveHash = await sha256(JSON.stringify(objectiveFindings));
       const aiReview = cfg.OPENAI_API_KEY ? await reviewWithAi(cfg.OPENAI_API_KEY,cfg.OPENAI_MODEL || "gpt-4o-mini",criteria,objectiveFindings,snapshot,livePages,p.evidence_notes || "") : null;
       const findings = aiReview?.status === "COMPLETED" ? objectiveFindings.map((finding,index) => ({ ...finding, aiReview: aiReview.assessments[index] })) : objectiveFindings;
@@ -600,6 +616,64 @@ export async function POST(request: Request) {
         return fail(`PayPal reconciliation requires review: ${result.outcome}`,409);
       return json(result);
     } catch (error) { return fail(error instanceof Error ? error.message : "Payment reconciliation failed", 502); }
+  }
+  // ── Inspector crew: an advisory AI read-through of the delivered site, streamed step by step ──
+  if (action === "crew_start") {
+    if (userRole !== "client") return fail("Only the client can dispatch the inspectors", 403);
+    if (!cfg.GROQ_API_KEY) return fail("The inspector crew isn’t set up on this site yet", 503);
+    if (!p.current_submission_id || !p.evidence_url || !["SUBMITTED","REVIEW","APPROVED","REVISION_REQUESTED"].includes(p.status)) return fail("Inspectors can be dispatched once work has been submitted", 409);
+    const active = await db().prepare("SELECT id FROM crew_runs WHERE project_id=? AND submission_id=? AND status='RUNNING' AND updated_at > ? LIMIT 1")
+      .bind(id,p.current_submission_id,new Date(Date.now() - 3 * 60_000).toISOString()).first<{ id: string }>();
+    if (active) return json({ runId: active.id, resumed: true });
+    const runId = crypto.randomUUID(), time = now(), model = cfg.GROQ_MODEL || DEFAULT_GROQ_MODEL;
+    const state = initialCrewState(p.evidence_url,JSON.parse(p.criteria_json) as Criterion[],p.evidence_notes || "");
+    await db().batch([
+      db().prepare("UPDATE crew_runs SET status='STOPPED',updated_at=? WHERE project_id=? AND status='RUNNING'").bind(time,id),
+      db().prepare("INSERT INTO crew_runs (id,project_id,submission_id,status,model,steps,pages_read,messages_json,started_by,started_at,updated_at) VALUES (?,?,?,?,?,0,0,?,?,?,?)")
+        .bind(runId,id,p.current_submission_id,"RUNNING",model,JSON.stringify(state),user.email,time,time),
+      db().prepare("INSERT INTO crew_events (run_id,project_id,kind,text,created_at) VALUES (?,?,?,?,?)")
+        .bind(runId,id,"NOTE",`Inspectors dispatched to ${new URL(p.evidence_url).host}`,time),
+    ]);
+    await event(id,user.email,"CREW_DISPATCHED",`Inspector crew ${runId} (${model}) sent to read submission ${p.current_submission_id}. Advisory only.`);
+    return json({ runId });
+  }
+  if (action === "crew_step") {
+    if (!cfg.GROQ_API_KEY) return fail("The inspector crew isn’t set up on this site yet", 503);
+    const runId = String(input.runId || "");
+    const run = await db().prepare("SELECT id,status,model,messages_json FROM crew_runs WHERE id=? AND project_id=?").bind(runId,id)
+      .first<{ id: string; status: string; model: string; messages_json: string }>();
+    if (!run) return fail("Inspection not found", 404);
+    if (run.status !== "RUNNING") return json({ done: true, status: run.status });
+    // One step at a time per run, even with several tabs open.
+    const lockUntil = new Date(Date.now() + 60_000).toISOString();
+    const locked = await db().prepare("UPDATE crew_runs SET step_lock_until=? WHERE id=? AND status='RUNNING' AND (step_lock_until IS NULL OR step_lock_until < ?)").bind(lockUntil,runId,now()).run();
+    if (!locked.meta.changes) return json({ busy: true });
+    const state = JSON.parse(run.messages_json) as CrewState;
+    const save = async (events: CrewEvent[], status: string, report: unknown = null) => {
+      const time = now();
+      await db().batch([
+        ...events.map(e => db().prepare("INSERT INTO crew_events (run_id,project_id,kind,page_url,criterion_index,verdict,text,created_at) VALUES (?,?,?,?,?,?,?,?)")
+          .bind(runId,id,e.kind,e.pageUrl ?? null,e.criterionIndex ?? null,e.verdict ?? null,e.text.slice(0,600),time)),
+        db().prepare("UPDATE crew_runs SET status=?,messages_json=?,steps=?,pages_read=?,report_json=COALESCE(?,report_json),step_lock_until=NULL,updated_at=?,completed_at=CASE WHEN ?='RUNNING' THEN NULL ELSE ? END WHERE id=?")
+          .bind(status,JSON.stringify(state),state.steps,Object.keys(state.pages).length,report ? JSON.stringify(report) : null,time,status,time,runId),
+      ]);
+    };
+    try {
+      const result = await crewStep(state,{ apiKey: cfg.GROQ_API_KEY, model: run.model });
+      if (!result.state.done) { await save(result.events,"RUNNING"); return json({ done: false }); }
+      const report = { summary: result.state.summary, findings: finalizeFindings(result.state) };
+      await save(result.events,"DONE",report);
+      const counts = (["VERIFIED","FAILED","INCONCLUSIVE"] as const).map(v => `${report.findings.filter(f => f.verdict === v).length} ${v.toLowerCase()}`).join(", ");
+      await event(id,"Inspector crew","CREW_REPORT",`Crew ${runId}: ${counts}; ${Object.keys(result.state.pages).length} pages read; report ${await sha256(JSON.stringify(report))}. Advisory only; the client decides.`);
+      return json({ done: true, status: "DONE" });
+    } catch (error) {
+      if (error instanceof CrewRateLimited) {
+        await db().prepare("UPDATE crew_runs SET step_lock_until=NULL WHERE id=?").bind(runId).run();
+        return json({ done: false, retryAfterMs: error.retryAfterMs });
+      }
+      await save([{ kind: "ERROR", text: error instanceof Error ? error.message.slice(0,300) : "The inspection stopped unexpectedly." }],"FAILED");
+      return fail("The inspection stopped. You can dispatch the inspectors again.", 502);
+    }
   }
   return fail("Unknown action");
 }

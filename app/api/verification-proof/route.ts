@@ -5,14 +5,19 @@ import { replayVerification, type VerificationArtifact } from "../../../lib/veri
 import { sha256, validateSnapshot } from "../../../lib/website-evidence";
 import { sha256Bytes } from "../../../lib/browser-evidence";
 
+import { evidenceStore } from "../../../lib/evidence-store";
+
 export const runtime = "edge";
+/** Private evidence: R2 when bound, otherwise the database fallback. */
+const hasStore = () => !!evidenceStore(env);
+const store = () => { const s = evidenceStore(env); if (!s) throw new Error("Private evidence storage is unavailable"); return s; };
 const cfg = env as Cloudflare.Env & { AUDIT_HMAC_KEY?: string };
 const fail = (message: string, status: number) => Response.json({ error: message }, { status, headers: { "Cache-Control": "no-store" } });
 
 export async function GET(request: Request) {
   const user = await getUser();
   if (!user) return fail("Sign in is required",401);
-  if (!env.DB || !env.BUCKET) return fail("Verification storage is unavailable",503);
+  if (!env.DB || !hasStore()) return fail("Verification storage is unavailable",503);
   const url = new URL(request.url);
   const projectId = url.searchParams.get("projectId");
   const runId = url.searchParams.get("runId");
@@ -33,7 +38,7 @@ export async function GET(request: Request) {
     .bind(artifact.submission_id,projectId).first<{ id: string; url: string; snapshot_key: string; snapshot_hash: string; manifest_json: string; submission_hash: string; created_at: string }>();
   if (!run || !submission || run.submission_id !== artifact.submission_id || run.snapshot_hash !== artifact.snapshot_hash || submission.snapshot_hash !== artifact.snapshot_hash)
     return fail("Verification records disagree",409);
-  const [snapshotObject,liveObject] = await Promise.all([env.BUCKET.get(submission.snapshot_key),env.BUCKET.get(artifact.live_key)]);
+  const [snapshotObject,liveObject] = await Promise.all([store().get(submission.snapshot_key),store().get(artifact.live_key)]);
   if (!snapshotObject || !liveObject) return fail("Verification evidence is missing",409);
   const [snapshotRaw,liveRaw] = await Promise.all([snapshotObject.text(),liveObject.text()]);
   const snapshot = await validateSnapshot(snapshotRaw,artifact.snapshot_hash,submission.manifest_json,submission.url);
@@ -46,7 +51,7 @@ export async function GET(request: Request) {
     const rendered = screenshot === "submission" ? snapshot.renderedRoot :
       (JSON.parse(liveRaw) as { pages: Array<{ renderedRoot?: { screenshotKey: string; screenshotHash: string } }> }).pages[0]?.renderedRoot;
     if (!rendered) return fail("No rendered screenshot was captured",404);
-    const object = await env.BUCKET.get(rendered.screenshotKey);
+    const object = await store().get(rendered.screenshotKey);
     if (!object) return fail("Rendered screenshot is missing",409);
     const bytes = new Uint8Array(await object.arrayBuffer());
     if (await sha256Bytes(bytes) !== rendered.screenshotHash) return fail("Rendered screenshot failed integrity verification",409);

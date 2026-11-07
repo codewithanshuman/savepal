@@ -3,12 +3,17 @@ import { getUser } from "../../auth";
 import { validateSnapshot } from "../../../lib/website-evidence";
 import { sha256Bytes } from "../../../lib/browser-evidence";
 
+import { evidenceStore } from "../../../lib/evidence-store";
+
 export const runtime = "edge";
+/** Private evidence: R2 when bound, otherwise the database fallback. */
+const hasStore = () => !!evidenceStore(env);
+const store = () => { const s = evidenceStore(env); if (!s) throw new Error("Private evidence storage is unavailable"); return s; };
 
 export async function GET(request: Request) {
   const user = await getUser();
   if (!user) return Response.json({ error: "Sign in is required" }, { status: 401 });
-  if (!env.DB || !env.BUCKET) return Response.json({ error: "Evidence storage is unavailable" }, { status: 503 });
+  if (!env.DB || !hasStore()) return Response.json({ error: "Evidence storage is unavailable" }, { status: 503 });
   const url = new URL(request.url);
   const projectId = url.searchParams.get("projectId");
   const submissionId = url.searchParams.get("submissionId");
@@ -18,14 +23,14 @@ export async function GET(request: Request) {
   const submission = await env.DB.prepare("SELECT snapshot_key,snapshot_hash,manifest_json,url FROM evidence_submissions WHERE id=? AND project_id=?")
     .bind(submissionId,projectId).first<{ snapshot_key: string; snapshot_hash: string; manifest_json: string; url: string }>();
   if (!submission) return Response.json({ error: "Evidence not found" }, { status: 404 });
-  const object = await env.BUCKET.get(submission.snapshot_key);
+  const object = await store().get(submission.snapshot_key);
   if (!object) return Response.json({ error: "Evidence snapshot is missing" }, { status: 409 });
   const raw = await object.text();
   const snapshot = await validateSnapshot(raw,submission.snapshot_hash,submission.manifest_json,submission.url);
   if (!snapshot) return Response.json({ error: "Evidence snapshot failed integrity verification" }, { status: 409 });
   if (url.searchParams.get("view") === "screenshot") {
     if (!snapshot.renderedRoot) return Response.json({ error: "No rendered screenshot was captured" }, { status: 404 });
-    const image = await env.BUCKET.get(snapshot.renderedRoot.screenshotKey);
+    const image = await store().get(snapshot.renderedRoot.screenshotKey);
     if (!image) return Response.json({ error: "Rendered screenshot is missing" }, { status: 409 });
     const bytes = new Uint8Array(await image.arrayBuffer());
     if (await sha256Bytes(bytes) !== snapshot.renderedRoot.screenshotHash)
