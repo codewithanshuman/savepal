@@ -12,10 +12,10 @@ const nav = [
 ];
 
 const steps = [
-  { title: "Agree on the work", body: "The client sets the amount and what “done” means. Both sides lock the same terms.", icon: LockKeyhole },
+  { title: "Agree and secure funds", body: "The client sets what “done” means and reserves the payment with PayPal before work starts.", icon: LockKeyhole },
   { title: "Deliver a live link", body: "The freelancer submits the website. SavePal keeps a time-stamped copy of it.", icon: Link2 },
   { title: "Check every requirement", body: "Each requirement is checked automatically, with the proof shown beside it.", icon: ScanSearch },
-  { title: "Approve and pay", body: "The client approves, then pays with PayPal. Every step stays on the record.", icon: CircleDollarSign },
+  { title: "Approve and release", body: "The client approves, and PayPal releases the held money to the freelancer.", icon: CircleDollarSign },
 ];
 
 const features = [
@@ -29,6 +29,7 @@ const features = [
 
 const faqs = [
   { q: "Does SavePal move real money?", a: "No. SavePal only uses the PayPal sandbox, PayPal’s test environment. It shows the full path from delivery to payment without charging anyone." },
+  { q: "What happens to the money before the work is approved?", a: "PayPal holds it on the client’s account; nothing is charged yet. The freelancer can decline and release it at any time, and the client can cancel only before any work has been submitted. A PayPal hold lasts up to 29 days." },
   { q: "Who decides whether the work is accepted?", a: "The client, always. Automatic checks prepare the evidence, but they never approve work or release payment on their own." },
   { q: "What can SavePal check automatically?", a: "Whether the site loads, whether certain text appears or must not appear, the page title, a specific button or link, a specific page, and broken pages. Anything it can’t prove is marked “needs review” instead of guessed." },
   { q: "What if a requirement fails but I still want to approve?", a: "You can, but you have to say why. That reason is saved with the approval so both sides can see it." },
@@ -36,8 +37,8 @@ const faqs = [
 ];
 
 const paypalPoints = [
-  { title: "Pays the right person", body: "The freelancer connects their own PayPal account. Checkout can only pay that verified account.", icon: Fingerprint },
-  { title: "Tied to the approval", body: "Every PayPal order carries the approval it belongs to, so a payment can’t be reused for other work.", icon: ReceiptText },
+  { title: "Secured before work starts", body: "The client reserves the payment with PayPal up front. The freelancer starts knowing the money is there.", icon: LockKeyhole },
+  { title: "Tied to the agreement", body: "The hold is bound to the exact agreed terms, and the release carries the client’s approval.", icon: ReceiptText },
   { title: "Paid means PayPal confirmed", body: "A milestone counts as paid only once PayPal confirms it. Updates from PayPal, refunds included, keep it in sync.", icon: CircleDollarSign },
 ];
 
@@ -78,7 +79,7 @@ function ProductPreview() {
         {checks.map(([t, d]) => <li key={t}><span className="lp-mock-ok" /><div><b>{t}</b><small>{d}</small></div><em>Verified</em></li>)}
       </ul>
       <div className="lp-mock-pay">
-        <span>Approve and pay with</span>
+        <span>Approve and release with</span>
         <span className="lp-mock-pp"><PayPalMark /></span>
       </div>
     </div>
@@ -132,7 +133,7 @@ export default function Landing() {
       <div className="lp-head" data-reveal>
         <p className="lp-eyebrow">Powered by PayPal</p>
         <h2>The money moves only when the work is proven</h2>
-        <p className="lp-lead">PayPal isn’t an add-on here. It decides who gets paid, what the payment is for, and when it counts as paid.</p>
+        <p className="lp-lead">PayPal isn’t an add-on here. It holds the money before work starts, ties it to the agreement, and confirms when it’s paid.</p>
       </div>
       <div className="lp-pp-grid">
         {paypalPoints.map((p, i) => <article key={p.title} className="lp-pp-card" data-reveal style={{ ["--d" as string]: `${i * 70}ms` }}>
