@@ -1,11 +1,12 @@
 import { requireApprovalReceipt, type StoredApprovalProject } from "./approval-store.ts";
-import { orderCustomId } from "./approval-receipt.ts";
+import { paymentBinding } from "./funding.ts";
 import { recordCaptureObservation, type PaymentProject } from "./payment-store.ts";
 import { PayPalSandbox, orderCapture, orderMatches, retrySafe, safeMerchantId, safeProviderId, type ExpectedPayment } from "./paypal-assurance.ts";
 
 export type ReconcileProject = StoredApprovalProject & PaymentProject & {
   payment_request_id: string | null; payment_order_requested_at: string | null;
   payment_capture_request_id: string | null; payment_capture_requested_at: string | null;
+  funding_custom_id?: string | null; paypal_authorization_id?: string | null;
 };
 export type ReconciliationResult = { projectId: string; outcome: string; paymentStatus: string | null; captureId: string | null };
 
@@ -21,14 +22,20 @@ export async function reconcileProject(
     if (!safeMerchantId(project.payment_recipient_merchant_id))
       throw new Error("Payment recipient is not bound to this milestone");
     const receipt = await requireApprovalReceipt(db,project,auditSecret);
+    const binding = paymentBinding(project,receipt);
+    const hold = binding.intent === "AUTHORIZE";
     const expected: ExpectedPayment = {
       projectId: project.id, orderId: project.paypal_order_id || undefined,
-      captureId: project.paypal_capture_id || undefined, customId: orderCustomId(receipt),
+      captureId: project.paypal_capture_id || undefined, customId: binding.customId,
       amountCents: project.amount_cents, currency: project.currency,
-      merchantId: project.payment_recipient_merchant_id,
+      merchantId: project.payment_recipient_merchant_id, intent: binding.intent,
     };
     let orderId = project.paypal_order_id;
-    if (!orderId) {
+    if (!orderId && hold) {
+      // A fund-first order always exists before approval; a missing one needs a person to look.
+      outcome = "ORDER_REVIEW_REQUIRED";
+      detail = "Fund-first milestone has no PayPal order on record";
+    } else if (!orderId) {
       if (!project.payment_request_id || !retrySafe(project.payment_order_requested_at)) {
         outcome = "ORDER_REVIEW_REQUIRED";
         detail = "An order ID is missing and the safe request retry window has ended";
@@ -52,6 +59,13 @@ export async function reconcileProject(
         if (!retrySafe(project.payment_capture_requested_at)) {
           outcome = "CAPTURE_REVIEW_REQUIRED";
           detail = "Capture request has no confirmed result beyond the safe retry window";
+        } else if (hold) {
+          if (!project.paypal_authorization_id) throw new Error("Fund-first milestone has no PayPal hold on record");
+          await client.captureAuthorization(project.paypal_authorization_id,project.payment_capture_request_id,receipt.receipt_hash,expected.merchantId);
+          const refreshed = await client.getOrder(orderId,expected.merchantId);
+          if (!orderMatches(refreshed,{...expected,orderId})) throw new Error("Provider order changed during release recovery");
+          capture = orderCapture(refreshed,{...expected,orderId});
+          if (!capture) throw new Error("PayPal release is not yet visible after retry");
         } else {
           await client.captureOrder(orderId,project.payment_capture_request_id,expected.merchantId);
           const refreshed = await client.getOrder(orderId,expected.merchantId);
@@ -65,6 +79,8 @@ export async function reconcileProject(
         const confirmedCapture = await client.getCapture(capture.id!,expected.merchantId);
         const observation = await recordCaptureObservation(db,
           {...project,paypal_order_id:orderId},confirmedOrder,confirmedCapture,expected.customId,"RECOVERY",undefined,auditSecret);
+        if (hold) await db.prepare("UPDATE projects SET funding_status='CAPTURED',updated_at=? WHERE id=? AND paypal_capture_id=? AND funding_status<>'CAPTURED'")
+          .bind(time,project.id,observation.captureId).run();
         outcome = "CAPTURE_CONFIRMED";
         detail = `Capture ${observation.captureId}; provider status ${confirmedCapture.status}; local status ${observation.status}`;
         paymentStatus = observation.status;

@@ -381,3 +381,39 @@ h1{font-size:32px;font-weight:700;letter-spacing:-.6px;line-height:1.2}
 .legal-body a{color:var(--sky)}
 @media(max-width:600px){.legal-body h1{font-size:40px}.legal-top{flex-direction:column;align-items:flex-start}}
 .signin-note a{color:var(--ink-2)}
+
+/* ── fund first: PayPal money timeline ── */
+.money{display:flex;flex-direction:column;gap:12px}
+.money-head{display:flex;align-items:center;justify-content:space-between;gap:10px}
+.money-head img{height:20px;width:auto;display:block;mix-blend-mode:multiply}
+.money-state{font-size:11px;font-weight:700;padding:4px 10px;border-radius:999px;background:#eef1f6;color:var(--ink-2);text-transform:capitalize}
+.money-state.s-held{background:#e8f0ff;color:#003087}
+.money-state.s-released{background:var(--ok-bg);color:var(--ok)}
+.money-amount{font-size:30px;font-weight:700;letter-spacing:-.6px;color:var(--ink)}
+.money-steps{list-style:none;margin:2px 0 0;padding:0;display:grid;grid-template-columns:repeat(3,1fr);gap:6px;position:relative}
+.money-steps li{display:flex;flex-direction:column;align-items:flex-start;gap:6px;font-size:11px;font-weight:600;color:var(--ink-3);position:relative}
+.money-steps li span{width:24px;height:24px;border-radius:50%;display:grid;place-items:center;font-size:11px;font-weight:700;background:#fff;color:var(--ink-3);box-shadow:inset 0 0 0 1.5px #d9e2ef;position:relative;z-index:1}
+.money-steps li:not(:last-child)::after{content:"";position:absolute;left:28px;right:4px;top:11px;height:2px;border-radius:2px;background:#e3e9f3}
+.money-steps li.done{color:#003087}
+.money-steps li.done span{background:#003087;color:#fff;box-shadow:none}
+.money-steps li.done:not(:last-child)::after{background:#003087}
+.money-steps li.current{color:var(--ink)}
+.money-steps li.current span{box-shadow:inset 0 0 0 2px #003087;color:#003087}
+.money-msg{margin:0;font-size:12.5px;line-height:1.55;color:var(--ink-2)}
+.money-note{margin:0;font-size:11.5px;color:var(--ink-3)}
+.money-note.warn{color:var(--warn);font-weight:600}
+.money .paypal-button{margin-top:2px}
+.money-release{background:#ffc439!important;color:#1a1a1a!important;box-shadow:0 10px 22px -12px rgba(180,130,0,.7)!important}
+.money-release:hover:not(:disabled){background:#f2b52e!important}
+.money-refresh{align-self:center}
+.funding-wait{margin-top:16px}
+.held-tag{font-size:10px;font-weight:700;color:#003087;background:#e8f0ff;padding:5px 9px;border-radius:999px;white-space:nowrap}
+.funding-choice{display:grid;grid-template-columns:1fr 1fr;gap:10px}
+.funding-label{grid-column:1/-1;font-size:11.5px;font-weight:650;color:var(--ink-2)}
+.funding-option{display:flex;flex-direction:column;gap:5px;text-align:left;padding:14px 16px;border-radius:14px;border:0;background:#fbfcff;box-shadow:inset 0 0 0 1px #dbe4f1;cursor:pointer;transition:box-shadow .2s,background .2s}
+.funding-option b{display:flex;align-items:center;gap:8px;font-size:13.5px;color:var(--ink)}
+.funding-option b em{font-style:normal;font-size:10px;font-weight:700;color:#003087;background:#e8f0ff;padding:2px 7px;border-radius:999px}
+.funding-option span{font-size:12px;line-height:1.5;color:var(--ink-3)}
+.funding-option.on{background:#fff;box-shadow:inset 0 0 0 2px var(--sky)}
+.funding-option:disabled{cursor:not-allowed;opacity:.6}
+@media(max-width:600px){.funding-choice{grid-template-columns:1fr}.held-tag{display:none}}

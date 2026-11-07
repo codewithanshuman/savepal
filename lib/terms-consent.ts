@@ -3,14 +3,22 @@ import { sha256 } from "./website-evidence.ts";
 
 export const TERMS_VERSION = "savepal-terms-v1";
 
-export type TermsProject = ApprovalProject & { max_revisions: number | null };
+export type TermsProject = ApprovalProject & { max_revisions: number | null; funding_mode?: string | null };
 
 /**
  * Fingerprint of everything both parties agree to. It wraps the existing agreement hash (used by
  * approval receipts and offline proofs) and adds terms introduced later, so older receipts stay valid.
+ * Fund-first is appended only when chosen, so pay-after-approval agreements keep their original hash.
  */
 export async function termsHash(project: TermsProject): Promise<string> {
-  return sha256(JSON.stringify([TERMS_VERSION, await agreementHash(project), project.max_revisions ?? null]));
+  const terms: unknown[] = [TERMS_VERSION, await agreementHash(project), project.max_revisions ?? null];
+  if (project.funding_mode === "HOLD") terms.push("fund-first:paypal-authorization");
+  return sha256(JSON.stringify(terms));
+}
+
+/** PayPal custom_id for a fund-first order: ties the hold to the exact agreed terms. */
+export function fundingCustomId(hash: string): string {
+  return `terms:${hash}`;
 }
 
 /** Short, human-comparable form shown to both parties, e.g. "9F3C-2E7A-B41D". */

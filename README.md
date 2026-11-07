@@ -18,6 +18,7 @@ SavePal links a locked website milestone, evidence, objective verification, a cl
 - Append-only, per-agreement audit hash chains; optional HMAC key protects against database-only tampering
 - Optional structured OpenAI review of each criterion, with page IDs and quotes validated against submitted and live evidence. The model's assessments are advisory and cannot change objective results or authorize payment; input, output, model, and response hashes are retained with the run.
 - Client approval or revision request, with an immutable receipt hashing the agreement, exact submission, verification findings, approver, reason, and amount
+- **Fund first, release on proof (default for new agreements):** once the freelancer accepts, the client secures the milestone with a PayPal **authorization** (a hold, not a charge) bound to the agreed-terms fingerprint. The freelancer can only deliver while PayPal holds the funds. Approval releases them by capturing the authorization, with the approval receipt hash as the capture's invoice ID. The freelancer can decline and release the hold at any time before approval; the client can cancel only before any work is submitted. Webhooks and reconciliation track voided and expired holds.
 - PayPal sandbox order creation bound to the approval receipt, buyer approval, capture, exact provider-side order and capture validation, and bounded idempotent retries
 - Provider reconciliation after ambiguous responses, webhook recovery of captures before local persistence, and append-only payment observations with webhook replay checks
 - PayPal partner seller referral and return callback: the assigned freelancer connects a sandbox seller account, provider integration permissions are checked, and the recipient merchant ID is frozen on the payment request. Checkout and capture validate the provider's payee against that bound recipient. A merchant-only configuration is explicitly labelled as a merchant payment.
@@ -42,6 +43,7 @@ node --import ./scripts/sites-env.mjs ./node_modules/wrangler/bin/wrangler.js d1
 node --import ./scripts/sites-env.mjs ./node_modules/wrangler/bin/wrangler.js d1 execute DB --local --config dist/server/wrangler.json --persist-to .wrangler/state --file drizzle/0004_foamy_kate_bishop.sql
 node --import ./scripts/sites-env.mjs ./node_modules/wrangler/bin/wrangler.js d1 execute DB --local --config dist/server/wrangler.json --persist-to .wrangler/state --file drizzle/0005_shiny_jean_grey.sql
 node --import ./scripts/sites-env.mjs ./node_modules/wrangler/bin/wrangler.js d1 execute DB --local --config dist/server/wrangler.json --persist-to .wrangler/state --file drizzle/0006_fantastic_changeling.sql
+node --import ./scripts/sites-env.mjs ./node_modules/wrangler/bin/wrangler.js d1 execute DB --local --config dist/server/wrangler.json --persist-to .wrangler/state --file drizzle/0007_robust_sersi.sql
 npm run dev -- --port 5174
 ```
 

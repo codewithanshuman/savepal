@@ -8,6 +8,8 @@ export type PaymentProject = {
   paypal_order_id: string | null; paypal_capture_id: string | null;
   payment_recipient_merchant_id?: string | null;
   payment_status: string;
+  /** "HOLD": paid by capturing a PayPal authorization placed before work began. */
+  funding_mode?: string | null;
 };
 
 export type ObservationSource = "CAPTURE" | "SYNC" | "WEBHOOK" | "RECOVERY";
@@ -38,17 +40,18 @@ export async function recordCaptureObservation(
 ): Promise<{ status: string; captureId: string; changed: boolean }> {
   const orderId = project.paypal_order_id;
   const captureId = capture.id;
+  const intent = project.funding_mode === "HOLD" ? "AUTHORIZE" as const : "CAPTURE" as const;
   if (project.status !== "APPROVED" || !orderId || !safeProviderId(orderId) ||
       !safeMerchantId(project.payment_recipient_merchant_id) ||
       !safeProviderId(captureId) ||
       !captureMatchesOrder(capture,{
         projectId: project.id, orderId, captureId,
         customId, amountCents: project.amount_cents, currency: project.currency,
-        merchantId: project.payment_recipient_merchant_id || undefined,
+        merchantId: project.payment_recipient_merchant_id || undefined, intent,
       }) || orderCapture(order,{
         projectId: project.id, orderId, captureId,
         customId, amountCents: project.amount_cents, currency: project.currency,
-        merchantId: project.payment_recipient_merchant_id || undefined,
+        merchantId: project.payment_recipient_merchant_id || undefined, intent,
       })?.id !== captureId) throw new Error("PayPal capture does not match the approved milestone");
   if (project.paypal_capture_id && project.paypal_capture_id !== captureId) throw new Error("Conflicting PayPal capture ID");
   const incoming = captureStatus(capture);

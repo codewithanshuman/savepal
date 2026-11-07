@@ -1,5 +1,11 @@
 import { captureMatches, parseUsdCents, providerPaymentStatus, type PaymentStatus } from "./assurance.ts";
 
+/**
+ * CAPTURE: pay after approval (one-step checkout). AUTHORIZE: fund first, where the client's PayPal
+ * approval places a hold that is captured only after the client approves the delivered work.
+ */
+export type PaymentIntent = "CAPTURE" | "AUTHORIZE";
+
 export type ExpectedPayment = {
   projectId: string;
   orderId?: string;
@@ -8,14 +14,25 @@ export type ExpectedPayment = {
   amountCents: number;
   currency: string;
   merchantId?: string;
+  intent?: PaymentIntent;
 };
 
 export type PayPalCapture = {
   id?: string;
   status?: string;
   amount?: { value?: string; currency_code?: string };
-  supplementary_data?: { related_ids?: { order_id?: string } };
+  supplementary_data?: { related_ids?: { order_id?: string; authorization_id?: string } };
   payee?: { merchant_id?: string };
+  invoice_id?: string;
+};
+
+export type PayPalAuthorization = {
+  id?: string;
+  status?: string;
+  amount?: { value?: string; currency_code?: string };
+  custom_id?: string;
+  expiration_time?: string;
+  supplementary_data?: { related_ids?: { order_id?: string } };
 };
 
 export type PayPalOrder = {
@@ -27,9 +44,24 @@ export type PayPalOrder = {
     custom_id?: string;
     payee?: { merchant_id?: string };
     amount?: { value?: string; currency_code?: string };
-    payments?: { captures?: PayPalCapture[] };
+    payments?: { captures?: PayPalCapture[]; authorizations?: PayPalAuthorization[] };
   }>;
 };
+
+/** Local view of a hold: HELD means PayPal has reserved the funds and they can still be captured. */
+export type HoldStatus = "HELD" | "PENDING" | "CAPTURED" | "VOIDED" | "EXPIRED" | "FAILED";
+
+export function holdStatus(authorization: PayPalAuthorization): HoldStatus {
+  switch (authorization.status) {
+    case "CREATED": return "HELD";
+    case "PENDING": return "PENDING";
+    case "CAPTURED": case "PARTIALLY_CAPTURED": return "CAPTURED";
+    case "VOIDED": return "VOIDED";
+    case "EXPIRED": return "EXPIRED";
+    case "DENIED": return "FAILED";
+    default: throw new Error("PayPal returned an unsupported authorization status");
+  }
+}
 
 export type PayPalSellerIntegration = {
   merchant_id?: string; tracking_id?: string;
@@ -73,7 +105,7 @@ function moneyMatches(amount: { value?: string; currency_code?: string } | undef
 
 export function orderMatches(order: PayPalOrder, expected: ExpectedPayment): boolean {
   if (!order.id || (expected.orderId && order.id !== expected.orderId)) return false;
-  if (order.intent && order.intent !== "CAPTURE") return false;
+  if (order.intent && order.intent !== (expected.intent ?? "CAPTURE")) return false;
   if (order.purchase_units?.length !== 1) return false;
   const unit = order.purchase_units[0];
   return unit.reference_id === expected.projectId && unit.custom_id === expected.customId &&
@@ -89,6 +121,23 @@ export function orderCapture(order: PayPalOrder, expected: ExpectedPayment): Pay
   if (!captureMatches(capture,expected.amountCents,expected.currency,expected.captureId)) return null;
   if (capture.supplementary_data?.related_ids?.order_id && capture.supplementary_data.related_ids.order_id !== order.id) return null;
   return capture;
+}
+
+/** The single authorization on a fund-first order, if it matches the expected hold exactly. */
+export function orderAuthorization(order: PayPalOrder, expected: ExpectedPayment, authorizationId?: string): PayPalAuthorization | null {
+  if (expected.intent !== "AUTHORIZE" || !orderMatches(order,expected)) return null;
+  const authorizations = order.purchase_units![0].payments?.authorizations || [];
+  if (authorizations.length !== 1) return null;
+  const authorization = authorizations[0];
+  return authorizationMatches(authorization,expected,authorizationId) ? authorization : null;
+}
+
+export function authorizationMatches(authorization: PayPalAuthorization, expected: ExpectedPayment, authorizationId?: string): boolean {
+  if (!safeProviderId(authorization.id) || (authorizationId && authorization.id !== authorizationId)) return false;
+  if (!moneyMatches(authorization.amount,expected.amountCents,expected.currency)) return false;
+  if (authorization.custom_id !== undefined && authorization.custom_id !== expected.customId) return false;
+  const relatedOrder = authorization.supplementary_data?.related_ids?.order_id;
+  return !relatedOrder || !expected.orderId || relatedOrder === expected.orderId;
 }
 
 export function captureMatchesOrder(capture: PayPalCapture, expected: ExpectedPayment): boolean {
@@ -167,12 +216,14 @@ export class PayPalSandbox {
       ...(method === "POST" ? { body: JSON.stringify(body ?? {}) } : {}),
     });
     if (!response.ok) throw new Error(`PayPal ${method} ${path.split("/").slice(0,4).join("/")} failed with HTTP ${response.status}`);
+    // Void returns 204 No Content.
+    if (response.status === 204) return {} as T;
     return await response.json() as T;
   }
 
   createOrder(expected: ExpectedPayment, requestId: string): Promise<PayPalOrder> {
     return this.request("/v2/checkout/orders","POST",{
-      intent: "CAPTURE",
+      intent: expected.intent ?? "CAPTURE",
       purchase_units: [{
         reference_id: expected.projectId,
         custom_id: expected.customId,
@@ -190,6 +241,31 @@ export class PayPalSandbox {
   captureOrder(orderId: string, requestId: string, merchantId?: string): Promise<PayPalOrder> {
     if (!safeProviderId(orderId)) throw new Error("Invalid PayPal order ID");
     return this.request(`/v2/checkout/orders/${encodeURIComponent(orderId)}/capture`,"POST",{},requestId,merchantId);
+  }
+
+  /** Fund first: turns the buyer-approved order into a hold on the buyer's funds. */
+  authorizeOrder(orderId: string, requestId: string, merchantId?: string): Promise<PayPalOrder> {
+    if (!safeProviderId(orderId)) throw new Error("Invalid PayPal order ID");
+    return this.request(`/v2/checkout/orders/${encodeURIComponent(orderId)}/authorize`,"POST",{},requestId,merchantId);
+  }
+
+  getAuthorization(authorizationId: string, merchantId?: string): Promise<PayPalAuthorization> {
+    if (!safeProviderId(authorizationId)) throw new Error("Invalid PayPal authorization ID");
+    return this.request(`/v2/payments/authorizations/${encodeURIComponent(authorizationId)}`,"GET",undefined,undefined,merchantId);
+  }
+
+  /** Releases held funds to the payee. `invoiceId` carries the approval receipt hash. */
+  captureAuthorization(authorizationId: string, requestId: string, invoiceId: string, merchantId?: string): Promise<PayPalCapture> {
+    if (!safeProviderId(authorizationId)) throw new Error("Invalid PayPal authorization ID");
+    if (!/^[A-Za-z0-9:_-]{1,127}$/.test(invoiceId)) throw new Error("Invalid invoice reference");
+    return this.request(`/v2/payments/authorizations/${encodeURIComponent(authorizationId)}/capture`,"POST",
+      { final_capture: true, invoice_id: invoiceId, note_to_payer: "Released by SavePal after you approved the delivered work." },requestId,merchantId);
+  }
+
+  /** Cancels a hold so the buyer's funds are released. */
+  voidAuthorization(authorizationId: string, requestId: string, merchantId?: string): Promise<Record<string, never>> {
+    if (!safeProviderId(authorizationId)) throw new Error("Invalid PayPal authorization ID");
+    return this.request(`/v2/payments/authorizations/${encodeURIComponent(authorizationId)}/void`,"POST",{},requestId,merchantId);
   }
 
   getCapture(captureId: string, merchantId?: string): Promise<PayPalCapture> {

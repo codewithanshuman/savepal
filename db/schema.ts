@@ -38,6 +38,14 @@ export const projects = sqliteTable("projects", {
   termsHash: text("terms_hash"),
   acceptedTermsHash: text("accepted_terms_hash"),
   acceptedAt: text("accepted_at"),
+  // Fund first: CAPTURE = pay after approval; HOLD = PayPal authorization placed before work starts.
+  fundingMode: text("funding_mode").notNull().default("CAPTURE"),
+  fundingStatus: text("funding_status").notNull().default("NONE"),
+  fundingCustomId: text("funding_custom_id"),
+  paypalAuthorizationId: text("paypal_authorization_id").unique(),
+  fundingAuthorizeRequestId: text("funding_authorize_request_id"),
+  fundingHeldAt: text("funding_held_at"),
+  fundingExpiresAt: text("funding_expires_at"),
   createdAt: text("created_at").notNull(),
   updatedAt: text("updated_at").notNull(),
 });

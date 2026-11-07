@@ -118,7 +118,6 @@ export default function Landing() {
       <div className="lp-hero-grid">
         <div className="lp-hero-copy">
           <h1>Ship the work.<br />Get it paid.</h1>
-          <p className="lp-hero-sub">Agree on what “done” means, prove it was delivered, and get paid through PayPal.</p>
           <a href="/app" className="lp-cta">Start an agreement <span><ArrowRight size={17} /></span></a>
         </div>
       </div>

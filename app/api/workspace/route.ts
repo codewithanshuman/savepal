@@ -3,14 +3,15 @@ import { getUser } from "../../auth";
 import { CHECKER_VERSION, parseUsdCents, readBoundedHtml, safeWebsiteUrl, validateCriteria, type Criterion, type Finding, type WebsiteResult } from "../../../lib/assurance";
 import { approvalViolation, decisionGate, parseMaxRevisions, revisionAllowance } from "../../../lib/decision-policy";
 import { revisionHistory } from "../../../lib/revision-diff";
-import { consentState, termsFingerprint, termsHash } from "../../../lib/terms-consent";
+import { consentState, fundingCustomId, termsFingerprint, termsHash } from "../../../lib/terms-consent";
+import { canFund, canRelease, fundsSecured, isHold, voidAllowed } from "../../../lib/funding";
 import { findingConfidence, type AdvancedFinding } from "../../../lib/website-evidence";
 import { appendAudit, verifyAudit } from "../../../lib/audit";
 import { captureWebsite, evaluateSnapshot, sha256, snapshotManifest, validateSnapshot } from "../../../lib/website-evidence";
 import { reviewWithAi } from "../../../lib/ai-verification";
 import { approveWithReceipt, requireApprovalReceipt, type StoredApprovalProject } from "../../../lib/approval-store";
 import { orderCustomId } from "../../../lib/approval-receipt";
-import { PayPalSandbox, orderCapture, orderMatches, retrySafe, safeMerchantId, safeProviderId, type ExpectedPayment } from "../../../lib/paypal-assurance";
+import { PayPalSandbox, authorizationMatches, holdStatus, orderAuthorization, orderCapture, orderMatches, retrySafe, safeMerchantId, safeProviderId, type ExpectedPayment, type PaymentIntent } from "../../../lib/paypal-assurance";
 import { recordCaptureObservation } from "../../../lib/payment-store";
 import { createVerificationInput, type CapturedLivePage } from "../../../lib/verification-proof";
 import { beginSellerOnboarding, requireReadySeller } from "../../../lib/seller-onboarding";
@@ -33,6 +34,9 @@ type Project = StoredApprovalProject & {
   payment_recipient_merchant_id: string | null; payment_last_reconciled_at: string | null;
   max_revisions: number | null; revision_count: number;
   terms_hash: string | null; accepted_terms_hash: string | null; accepted_at: string | null;
+  funding_mode: string; funding_status: string; funding_custom_id: string | null;
+  paypal_authorization_id: string | null; funding_authorize_request_id: string | null;
+  funding_held_at: string | null; funding_expires_at: string | null;
   created_at: string; updated_at: string;
 };
 type EvidenceSubmission = { id: string; project_id: string; submission_hash: string; snapshot_hash: string; snapshot_key: string; manifest_json: string; created_at: string };
@@ -74,7 +78,13 @@ async function view(p: Project, user: { userId: string; email: string }) {
     revisions: { max: p.max_revisions, used: p.revision_count, ...revisionAllowance(p.max_revisions,p.revision_count) },
     consent: { ...consent, fingerprint: termsFingerprint(consent.termsHash) },
     criteria_json: undefined, findings_json: undefined, payment_request_id: undefined,
-    payment_capture_request_id: undefined, audit_head_hash: undefined,
+    payment_capture_request_id: undefined, audit_head_hash: undefined, funding_authorize_request_id: undefined,
+    funding: {
+      mode: p.funding_mode, status: p.funding_status, heldAt: p.funding_held_at, expiresAt: p.funding_expires_at,
+      canFund: role(p, user) === "client" && canFund(p),
+      canRelease: role(p, user) === "client" && canRelease(p),
+      canVoid: (() => { const r = role(p, user); return r ? voidAllowed(p, r) : { allowed: false }; })(),
+    },
     paymentAwaitingReconciliation: !!p.payment_request_id || !!p.paypal_order_id,
   };
 }
@@ -108,7 +118,7 @@ export async function GET(request: Request) {
   }
   const rows = await db().prepare("SELECT * FROM projects WHERE client_id = ? OR lower(freelancer_email) = ? ORDER BY created_at DESC")
     .bind(user.userId, user.email.toLowerCase()).all<Project>();
-  return json({ user: { name: user.displayName, email: user.email }, projects: await Promise.all(rows.results.map(p => view(p, user))), paypalReady: !!(cfg.PAYPAL_CLIENT_ID && cfg.PAYPAL_CLIENT_SECRET && (cfg.PAYPAL_PARTNER_MERCHANT_ID ? safeMerchantId(cfg.PAYPAL_PARTNER_MERCHANT_ID) && cfg.PAYPAL_PARTNER_BN_CODE : safeMerchantId(cfg.PAYPAL_MERCHANT_ID))), sellerOnboardingReady: !!(cfg.PAYPAL_CLIENT_ID && cfg.PAYPAL_CLIENT_SECRET && safeMerchantId(cfg.PAYPAL_PARTNER_MERCHANT_ID) && cfg.PAYPAL_PARTNER_BN_CODE), paymentMode: cfg.PAYPAL_PARTNER_MERCHANT_ID ? "SELLER" : "MERCHANT", paypalClientId: cfg.PAYPAL_CLIENT_ID || null, paypalPartnerBnCode: cfg.PAYPAL_PARTNER_BN_CODE || null, aiReady: !!cfg.OPENAI_API_KEY });
+  return json({ user: { name: user.displayName, email: user.email }, projects: await Promise.all(rows.results.map(p => view(p, user))), paypalReady: paypalReady(), sellerOnboardingReady: !!(cfg.PAYPAL_CLIENT_ID && cfg.PAYPAL_CLIENT_SECRET && safeMerchantId(cfg.PAYPAL_PARTNER_MERCHANT_ID) && cfg.PAYPAL_PARTNER_BN_CODE), paymentMode: cfg.PAYPAL_PARTNER_MERCHANT_ID ? "SELLER" : "MERCHANT", paypalClientId: cfg.PAYPAL_CLIENT_ID || null, paypalPartnerBnCode: cfg.PAYPAL_PARTNER_BN_CODE || null, aiReady: !!cfg.OPENAI_API_KEY });
 }
 
 async function inspectWebsite(url: string): Promise<WebsiteResult> {
@@ -140,11 +150,14 @@ function paypal() {
   } : undefined;
   return new PayPalSandbox(cfg.PAYPAL_CLIENT_ID,cfg.PAYPAL_CLIENT_SECRET,fetch,partner);
 }
-function paymentExpectation(p: Project, customId: string): ExpectedPayment {
+function paymentExpectation(p: Project, customId: string, intent: PaymentIntent = "CAPTURE"): ExpectedPayment {
   const merchantId = p.payment_recipient_merchant_id || (cfg.PAYPAL_PARTNER_MERCHANT_ID ? p.seller_merchant_id : cfg.PAYPAL_MERCHANT_ID);
   if (!safeMerchantId(merchantId)) throw new Error("A verified PayPal recipient is required before checkout");
   return { projectId: p.id, orderId: p.paypal_order_id || undefined, captureId: p.paypal_capture_id || undefined,
-    customId, amountCents: p.amount_cents, currency: p.currency, merchantId };
+    customId, amountCents: p.amount_cents, currency: p.currency, merchantId, intent };
+}
+function paypalReady(): boolean {
+  return !!(cfg.PAYPAL_CLIENT_ID && cfg.PAYPAL_CLIENT_SECRET && (cfg.PAYPAL_PARTNER_MERCHANT_ID ? safeMerchantId(cfg.PAYPAL_PARTNER_MERCHANT_ID) && cfg.PAYPAL_PARTNER_BN_CODE : safeMerchantId(cfg.PAYPAL_MERCHANT_ID)));
 }
 
 export async function POST(request: Request) {
@@ -161,17 +174,21 @@ export async function POST(request: Request) {
     const maxRevisions = parseMaxRevisions(input.maxRevisions);
     if (!title || !description || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(freelancerEmail) || freelancerEmail === user.email.toLowerCase() || amountCents === null) return fail("Enter a title, scope, a different freelancer email, and a USD amount from $1 to $1,000,000 with at most two decimals");
     if (maxRevisions === undefined) return fail("Revision limit must be a whole number from 0 to 20, or empty for no limit");
+    const fundingMode = input.fundingMode === "HOLD" ? "HOLD" : input.fundingMode === undefined || input.fundingMode === "CAPTURE" ? "CAPTURE" : null;
+    if (!fundingMode) return fail("Choose how this milestone is paid");
+    if (fundingMode === "HOLD" && !paypalReady()) return fail("Securing funds first needs PayPal to be connected on this site", 503);
     const checked = validateCriteria(input.criteria);
     if ("error" in checked) return fail(checked.error);
     const id = crypto.randomUUID(), time = now();
     const criteriaJson = JSON.stringify(checked.criteria);
     const terms = await termsHash({ id, client_id: user.userId, client_email: user.email, freelancer_email: freelancerEmail, title, description,
-      amount_cents: amountCents, currency: "USD", criteria_json: criteriaJson, max_revisions: maxRevisions,
+      amount_cents: amountCents, currency: "USD", criteria_json: criteriaJson, max_revisions: maxRevisions, funding_mode: fundingMode,
       status: "INVITED", evidence_hash: null, current_submission_id: null, latest_run_id: null, findings_json: null, audit_head_hash: null });
-    await db().prepare("INSERT INTO projects (id,client_id,client_email,freelancer_email,title,description,amount_cents,currency,criteria_json,status,payment_status,max_revisions,revision_count,terms_hash,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,0,?,?,?)")
-      .bind(id,user.userId,user.email,freelancerEmail,title,description,amountCents,"USD",criteriaJson,"INVITED","NOT_STARTED",maxRevisions,terms,time,time).run();
+    await db().prepare("INSERT INTO projects (id,client_id,client_email,freelancer_email,title,description,amount_cents,currency,criteria_json,status,payment_status,max_revisions,revision_count,terms_hash,funding_mode,funding_status,funding_custom_id,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,0,?,?,?,?,?,?)")
+      .bind(id,user.userId,user.email,freelancerEmail,title,description,amountCents,"USD",criteriaJson,"INVITED","NOT_STARTED",maxRevisions,terms,
+        fundingMode,"NONE",fundingMode === "HOLD" ? fundingCustomId(terms) : null,time,time).run();
     const required = checked.criteria.filter(c => c.required !== false).length;
-    await event(id,user.email,"AGREEMENT_CREATED",`Version 1 bound by client; terms ${terms} (${termsFingerprint(terms)}). ${checked.criteria.length} criteria (${required} required), ${maxRevisions === null ? "unlimited revisions" : `${maxRevisions} revision${maxRevisions === 1 ? "" : "s"}`}. Awaiting freelancer acceptance.`);
+    await event(id,user.email,"AGREEMENT_CREATED",`Version 1 bound by client; terms ${terms} (${termsFingerprint(terms)}). ${checked.criteria.length} criteria (${required} required), ${maxRevisions === null ? "unlimited revisions" : `${maxRevisions} revision${maxRevisions === 1 ? "" : "s"}`}. ${fundingMode === "HOLD" ? "Funds will be secured with PayPal before work starts." : "Paid with PayPal after approval."} Awaiting freelancer acceptance.`);
     return json({ id, termsHash: terms }, 201);
   }
   const id = String(input.id || "");
@@ -197,6 +214,7 @@ export async function POST(request: Request) {
 
   if (action === "submit") {
     if (userRole !== "freelancer" || !["AGREED","REVISION_REQUESTED"].includes(p.status)) return fail("Only the assigned freelancer can submit evidence after agreement or revision", 403);
+    if (!fundsSecured(p)) return fail("The client hasn’t secured the funds with PayPal yet. Work can be delivered once the money is held.", 409);
     const url = safeWebsiteUrl(input.url);
     const notes = String(input.notes || "").trim().slice(0, 3000);
     if (!url || !notes) return fail("Provide a public HTTPS website URL and evidence notes");
@@ -321,6 +339,7 @@ export async function POST(request: Request) {
     if (!p.latest_run_id || findings.length === 0) return fail("A completed verification run is required", 409);
     const intact = await termsIntact(p);
     if (intact) return fail(intact, 409);
+    if (action === "approve" && !fundsSecured(p)) return fail("PayPal is no longer holding the funds for this milestone. Secure them again before approving.", 409);
     if (action === "approve") {
       let gate;
       try { gate = decisionGate(JSON.parse(p.criteria_json) as Criterion[],findings); }
@@ -362,6 +381,8 @@ export async function POST(request: Request) {
       return json(result);
     } catch (error) { return fail(error instanceof Error ? error.message : "PayPal onboarding failed",502); }
   }
+  if ((action === "create_order" || action === "capture_order") && isHold(p))
+    return fail("This milestone was funded up front with PayPal. Release the held funds instead.", 409);
   if (action === "create_order") {
     if (userRole !== "client" || p.status !== "APPROVED") return fail("Client approval is required", 403);
     if (["COMPLETED","PARTIALLY_REFUNDED","REFUNDED"].includes(p.payment_status)) return fail("This milestone already has a captured payment", 409);
@@ -431,6 +452,145 @@ export async function POST(request: Request) {
       const observation = await recordCaptureObservation(db(),p,order,providerCapture,expected.customId,p.paypal_capture_id ? "RECOVERY" : "CAPTURE",undefined,cfg.AUDIT_HMAC_KEY);
       return json({ status: observation.status, captureId: observation.captureId });
     } catch (error) { return fail(error instanceof Error ? error.message : "PayPal capture failed", 502); }
+  }
+  // ── Fund first: secure (authorize) → deliver → approve → release (capture), or void ──
+  if (action === "fund_order") {
+    if (userRole !== "client") return fail("Only the client can secure the funds", 403);
+    if (!canFund(p)) return fail(isHold(p) ? "Funds can be secured after the freelancer accepts and before approval" : "This milestone is paid after approval", 409);
+    const intact = await termsIntact(p);
+    if (intact) return fail(intact, 409);
+    try {
+      const client = paypal();
+      const expected = paymentExpectation(p,p.funding_custom_id || "","AUTHORIZE");
+      if (cfg.PAYPAL_PARTNER_MERCHANT_ID && cfg.PAYPAL_CLIENT_ID)
+        await requireReadySeller(db(),p,client,cfg.PAYPAL_PARTNER_MERCHANT_ID,cfg.PAYPAL_CLIENT_ID);
+      // An order the client opened but didn't approve yet is reused while PayPal's retry window is open.
+      if (p.funding_status === "ORDER_CREATED" && p.paypal_order_id && retrySafe(p.payment_order_requested_at)) {
+        const existing = await client.getOrder(p.paypal_order_id,expected.merchantId);
+        if (orderMatches(existing,{...expected,orderId:p.paypal_order_id})) return json({ orderId: p.paypal_order_id });
+      }
+      // Otherwise start a fresh order: first funding, or re-funding after a void, expiry or failure.
+      const requestId = crypto.randomUUID(), requestedAt = now();
+      const reserved = await db().prepare("UPDATE projects SET payment_request_id=?,payment_order_requested_at=?,payment_recipient_merchant_id=COALESCE(payment_recipient_merchant_id,?),paypal_order_id=NULL,paypal_authorization_id=NULL,funding_authorize_request_id=NULL,funding_held_at=NULL,funding_expires_at=NULL,funding_status='ORDER_CREATED',updated_at=? WHERE id=? AND funding_mode='HOLD' AND funding_status=? AND paypal_capture_id IS NULL AND status IN ('AGREED','SUBMITTED','REVIEW','REVISION_REQUESTED') AND (payment_recipient_merchant_id IS NULL OR payment_recipient_merchant_id=?)")
+        .bind(requestId,requestedAt,expected.merchantId,requestedAt,id,p.funding_status,expected.merchantId).run();
+      if (!reserved.meta.changes) return fail("Funding state changed; refresh and try again", 409);
+      const created = await client.createOrder(expected,requestId);
+      if (!safeProviderId(created.id)) throw new Error("PayPal returned an invalid order ID");
+      await db().prepare("UPDATE projects SET paypal_order_id=?,updated_at=? WHERE id=? AND payment_request_id=? AND paypal_order_id IS NULL AND funding_status='ORDER_CREATED'")
+        .bind(created.id,now(),id,requestId).run();
+      const providerOrder = await client.getOrder(created.id,expected.merchantId);
+      if (!orderMatches(providerOrder,{...expected,orderId:created.id})) throw new Error("PayPal order amount, recipient or terms binding does not match");
+      await event(id,user.email,"PAYPAL_HOLD_ORDER_CREATED",`Sandbox order ${created.id} to hold ${(p.amount_cents/100).toFixed(2)} ${p.currency}; bound to terms ${p.funding_custom_id}`);
+      return json({ orderId: created.id });
+    } catch (error) { return fail(error instanceof Error ? error.message : "PayPal request failed", 502); }
+  }
+  if (action === "fund_authorize") {
+    if (userRole !== "client" || !isHold(p) || !p.paypal_order_id || String(input.orderId) !== p.paypal_order_id ||
+        !["ORDER_CREATED","PENDING"].includes(p.funding_status)) return fail("This PayPal approval doesn’t match the agreement", 409);
+    try {
+      const client = paypal();
+      const expected = paymentExpectation(p,p.funding_custom_id || "","AUTHORIZE");
+      let order = await client.getOrder(p.paypal_order_id,expected.merchantId);
+      if (!orderMatches(order,expected)) return fail("PayPal order does not match the agreed terms", 409);
+      let authorization = orderAuthorization(order,expected);
+      if (!authorization) {
+        if (order.purchase_units?.[0]?.payments?.authorizations?.length) return fail("PayPal returned a conflicting hold", 409);
+        const requestId = p.funding_authorize_request_id || crypto.randomUUID();
+        const reserved = await db().prepare("UPDATE projects SET funding_authorize_request_id=COALESCE(funding_authorize_request_id,?),updated_at=? WHERE id=? AND paypal_order_id=? AND funding_status='ORDER_CREATED' AND (funding_authorize_request_id IS NULL OR funding_authorize_request_id=?)")
+          .bind(requestId,now(),id,p.paypal_order_id,requestId).run();
+        if (!reserved.meta.changes) return fail("Funding state changed; refresh and try again", 409);
+        await client.authorizeOrder(p.paypal_order_id,requestId,expected.merchantId);
+        order = await client.getOrder(p.paypal_order_id,expected.merchantId);
+        authorization = orderAuthorization(order,expected);
+        if (!authorization) throw new Error("PayPal did not confirm the hold");
+      }
+      const confirmed = await client.getAuthorization(authorization.id!,expected.merchantId);
+      if (!authorizationMatches(confirmed,expected,authorization.id)) throw new Error("PayPal hold does not match the agreed amount");
+      const status = holdStatus(confirmed);
+      if (status !== "HELD" && status !== "PENDING") return fail(`PayPal reports the hold as ${status.toLowerCase()}`, 409);
+      const expires = confirmed.expiration_time && !Number.isNaN(Date.parse(confirmed.expiration_time)) ? new Date(confirmed.expiration_time).toISOString() : null;
+      const stored = await db().prepare("UPDATE projects SET paypal_authorization_id=?,funding_status=?,funding_held_at=COALESCE(funding_held_at,?),funding_expires_at=?,updated_at=? WHERE id=? AND paypal_order_id=? AND funding_status IN ('ORDER_CREATED','PENDING') AND (paypal_authorization_id IS NULL OR paypal_authorization_id=?)")
+        .bind(confirmed.id,status,now(),expires,now(),id,p.paypal_order_id,confirmed.id).run();
+      if (!stored.meta.changes) return fail("Funding state changed; refresh to see the latest status", 409);
+      await event(id,user.email,status === "HELD" ? "FUNDS_HELD" : "FUNDS_PENDING",
+        `PayPal authorization ${confirmed.id} ${status === "HELD" ? "holds" : "is reviewing"} ${(p.amount_cents/100).toFixed(2)} ${p.currency} for this milestone${expires ? `; hold valid until ${expires}` : ""}. Order ${p.paypal_order_id}.`);
+      return json({ status });
+    } catch (error) { return fail(error instanceof Error ? error.message : "PayPal hold failed", 502); }
+  }
+  if (action === "release_funds") {
+    if (userRole !== "client") return fail("Only the client can release the funds", 403);
+    if (!canRelease(p) || !p.paypal_authorization_id || !p.paypal_order_id) return fail("Funds can be released once the work is approved and PayPal is holding them", 409);
+    const intact = await termsIntact(p);
+    if (intact) return fail(intact, 409);
+    try {
+      const receipt = await requireApprovalReceipt(db(),p,cfg.AUDIT_HMAC_KEY);
+      const client = paypal();
+      const expected = paymentExpectation(p,p.funding_custom_id || "","AUTHORIZE");
+      const authorization = await client.getAuthorization(p.paypal_authorization_id,expected.merchantId);
+      if (!authorizationMatches(authorization,expected,p.paypal_authorization_id)) return fail("PayPal hold does not match the agreement", 409);
+      const status = holdStatus(authorization);
+      if (status !== "HELD" && status !== "CAPTURED") {
+        await db().prepare("UPDATE projects SET funding_status=?,updated_at=? WHERE id=? AND paypal_authorization_id=? AND paypal_capture_id IS NULL").bind(status,now(),id,p.paypal_authorization_id).run();
+        return fail(`The PayPal hold is ${status.toLowerCase()}, so it can’t be released. Ask the client to secure the funds again.`, 409);
+      }
+      if (status === "HELD") {
+        if (p.payment_capture_request_id && !retrySafe(p.payment_capture_requested_at)) return fail("Release outcome is uncertain after the safe retry window; reconcile with PayPal first", 409);
+        const requestId = p.payment_capture_request_id || crypto.randomUUID();
+        const reserved = await db().prepare("UPDATE projects SET payment_capture_request_id=COALESCE(payment_capture_request_id,?),payment_capture_requested_at=COALESCE(payment_capture_requested_at,?),payment_status=CASE WHEN payment_status='NOT_STARTED' THEN 'PENDING' ELSE payment_status END,updated_at=? WHERE id=? AND status='APPROVED' AND funding_status='HELD' AND paypal_authorization_id=? AND paypal_capture_id IS NULL AND approval_receipt_id=? AND (payment_capture_request_id IS NULL OR payment_capture_request_id=?)")
+          .bind(requestId,now(),now(),id,p.paypal_authorization_id,receipt.id,requestId).run();
+        if (!reserved.meta.changes) return fail("Release state changed; refresh before retrying", 409);
+        await client.captureAuthorization(p.paypal_authorization_id,requestId,receipt.receipt_hash,expected.merchantId);
+      }
+      const order = await client.getOrder(p.paypal_order_id,expected.merchantId);
+      const captured = orderCapture(order,{...expected,orderId:p.paypal_order_id});
+      if (!captured) throw new Error("PayPal capture could not be confirmed from the order");
+      const providerCapture = await client.getCapture(captured.id!,expected.merchantId);
+      if (providerCapture.invoice_id && providerCapture.invoice_id !== receipt.receipt_hash) throw new Error("PayPal capture is not tied to this approval");
+      if (providerCapture.supplementary_data?.related_ids?.authorization_id && providerCapture.supplementary_data.related_ids.authorization_id !== p.paypal_authorization_id) throw new Error("PayPal capture came from a different hold");
+      const observation = await recordCaptureObservation(db(),p,order,providerCapture,expected.customId,status === "CAPTURED" ? "RECOVERY" : "CAPTURE",undefined,cfg.AUDIT_HMAC_KEY);
+      const marked = await db().prepare("UPDATE projects SET funding_status='CAPTURED',updated_at=? WHERE id=? AND paypal_capture_id=? AND funding_status<>'CAPTURED'").bind(now(),id,observation.captureId).run();
+      if (marked.meta.changes) await event(id,user.email,"FUNDS_RELEASED",`Held funds released to the freelancer: capture ${observation.captureId} from authorization ${p.paypal_authorization_id}; approval ${receipt.receipt_hash}.`);
+      return json({ status: observation.status, captureId: observation.captureId });
+    } catch (error) { return fail(error instanceof Error ? error.message : "PayPal release failed", 502); }
+  }
+  if (action === "void_hold") {
+    const allowed = voidAllowed(p,userRole);
+    if (!allowed.allowed || !p.paypal_authorization_id) return fail(allowed.reason || "There are no held funds to release", 409);
+    // Claim the hold first so a submission or release can't race the cancellation.
+    const claimed = await db().prepare(`UPDATE projects SET funding_status='VOIDING',updated_at=? WHERE id=? AND paypal_authorization_id=? AND funding_status IN ('HELD','PENDING') AND status<>'APPROVED' AND paypal_capture_id IS NULL${userRole === "client" ? " AND evidence_url IS NULL" : ""}`)
+      .bind(now(),id,p.paypal_authorization_id).run();
+    if (!claimed.meta.changes) return fail("Funding state changed; refresh and try again", 409);
+    try {
+      const client = paypal();
+      const expected = paymentExpectation(p,p.funding_custom_id || "","AUTHORIZE");
+      let authorization = await client.getAuthorization(p.paypal_authorization_id,expected.merchantId);
+      if (!authorizationMatches(authorization,expected,p.paypal_authorization_id)) throw new Error("PayPal hold does not match the agreement");
+      if (["HELD","PENDING"].includes(holdStatus(authorization))) {
+        await client.voidAuthorization(p.paypal_authorization_id,crypto.randomUUID(),expected.merchantId);
+        authorization = await client.getAuthorization(p.paypal_authorization_id,expected.merchantId);
+      }
+      const status = holdStatus(authorization);
+      if (status !== "VOIDED" && status !== "EXPIRED") throw new Error(`PayPal reports the hold as ${status.toLowerCase()}`);
+      await db().prepare("UPDATE projects SET funding_status=?,updated_at=? WHERE id=? AND funding_status='VOIDING'").bind(status,now(),id).run();
+      await event(id,user.email,"FUNDS_RETURNED",`PayPal hold ${p.paypal_authorization_id} cancelled by the ${userRole}; the client’s funds are no longer reserved.`);
+      return json({ status });
+    } catch (error) {
+      await db().prepare("UPDATE projects SET funding_status=?,updated_at=? WHERE id=? AND funding_status='VOIDING'").bind(p.funding_status,now(),id).run().catch(() => {});
+      return fail(error instanceof Error ? error.message : "PayPal could not cancel the hold", 502);
+    }
+  }
+  if (action === "sync_payment" && isHold(p) && p.status !== "APPROVED") {
+    if (!p.paypal_authorization_id) return fail("No PayPal hold to refresh yet", 409);
+    try {
+      const expected = paymentExpectation(p,p.funding_custom_id || "","AUTHORIZE");
+      const authorization = await paypal().getAuthorization(p.paypal_authorization_id,expected.merchantId);
+      if (!authorizationMatches(authorization,expected,p.paypal_authorization_id)) return fail("PayPal hold does not match the agreement", 409);
+      const status = holdStatus(authorization);
+      const changed = await db().prepare("UPDATE projects SET funding_status=?,updated_at=? WHERE id=? AND paypal_authorization_id=? AND funding_status IN ('HELD','PENDING') AND funding_status<>?")
+        .bind(status,now(),id,p.paypal_authorization_id,status).run();
+      if (changed.meta.changes) await event(id,"PayPal reconciliation","FUNDS_STATUS_CHANGED",`PayPal reports hold ${p.paypal_authorization_id} as ${status}.`);
+      return json({ fundingStatus: status });
+    } catch (error) { return fail(error instanceof Error ? error.message : "PayPal refresh failed", 502); }
   }
   if (action === "sync_payment") {
     if (userRole !== "client" || (!p.paypal_order_id && !p.payment_request_id) || p.status !== "APPROVED") return fail("No payment request is available to reconcile", 409);
