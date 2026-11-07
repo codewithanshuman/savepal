@@ -37,7 +37,7 @@ export default async function SignIn({ searchParams }: { searchParams: Promise<R
         {devSignInAvailable() && <a href={`/signin-with-chatgpt${query}`} className="signin-btn signin-dev">Continue as local test user</a>}
         {!providers.length && !devSignInAvailable() && <p className="signin-error">Sign-in isn’t configured on this server yet.</p>}
       </div>
-      <p className="signin-note">We only read your name and verified email. Payments run in the PayPal sandbox; no real money moves.</p>
+      <p className="signin-note">We only read your name and verified email. Payments run in the PayPal sandbox; no real money moves. <a href="/privacy">Privacy</a> · <a href="/terms">Terms</a></p>
     </section>
   </main>;
 }
