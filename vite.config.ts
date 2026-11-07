@@ -37,7 +37,8 @@ const localBindingConfig = {
         },
       ]
     : [],
-  r2_buckets: r2
+  // SAVEPAL_R2_BUCKET=none deploys without evidence storage; submissions then report it unavailable.
+  r2_buckets: r2 && deploy.r2Bucket !== "none"
     ? [
         {
           binding: r2,
