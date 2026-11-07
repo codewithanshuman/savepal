@@ -6,6 +6,7 @@ import { ArrowRight, Check, CircleDollarSign, Fingerprint, GitCompareArrows, Lin
 const nav = [
   { href: "#top", label: "Home" },
   { href: "#how", label: "How it works" },
+  { href: "#paypal", label: "PayPal" },
   { href: "#features", label: "Features" },
   { href: "#faq", label: "FAQ" },
 ];
@@ -34,31 +35,51 @@ const faqs = [
   { q: "Can anyone change the record afterwards?", a: "No. Agreements, submissions and approvals are permanent, and any change to the agreed terms is detected and freezes payment." },
 ];
 
-function Mark() {
-  return <svg viewBox="0 0 24 24" width="22" height="22" aria-hidden="true"><path fill="currentColor" d="M12 2.5 4 5.6v6.1c0 4.7 3.3 8.6 8 9.8 4.7-1.2 8-5.1 8-9.8V5.6L12 2.5Zm-1.2 13.2-3.6-3.6 1.4-1.4 2.2 2.2 4.6-4.6 1.4 1.4-6 6Z"/></svg>;
-}
+const paypalPoints = [
+  { title: "Pays the right person", body: "The freelancer connects their own PayPal account. Checkout can only pay that verified account.", icon: Fingerprint },
+  { title: "Tied to the approval", body: "Every PayPal order carries the approval it belongs to, so a payment can’t be reused for other work.", icon: ReceiptText },
+  { title: "Paid means PayPal confirmed", body: "A milestone counts as paid only once PayPal confirms it. Updates from PayPal, refunds included, keep it in sync.", icon: CircleDollarSign },
+];
 
 function Logo({ dark }: { dark?: boolean }) {
-  return <a href="#top" className={`lp-logo ${dark ? "dark" : ""}`} aria-label="SavePal home"><Mark /><span>savepal</span></a>;
+  return <a href="#top" className={`lp-logo ${dark ? "dark" : ""}`} aria-label="SavePal home">savepal</a>;
+}
+
+function PayPalMark({ className }: { className?: string }) {
+  return <img src="/paypal-logo.webp" alt="PayPal" className={className} width={2000} height={511} />;
 }
 
 function ProductPreview() {
+  const agreements = [
+    { name: "Online store", who: "Maya Chen", status: "Ready to pay", tone: "pay", on: true },
+    { name: "Landing page", who: "Leo Park", status: "Paid", tone: "paid" },
+    { name: "Docs portal", who: "Sam Ortiz", status: "In review", tone: "review" },
+  ];
+  const checks = [
+    ["Website loads securely", "200 OK · live"],
+    ["Product catalog is on the site", "“Products” on /shop"],
+    ["No placeholder text left", "6 of 6 pages read"],
+  ];
   return <div className="lp-mock" aria-hidden="true">
     <div className="lp-mock-side">
-      <p className="lp-mock-crumb">Workspace / <b>Agreements</b></p>
-      <p className="lp-mock-title">Agreements <span>3</span></p>
-      {[["Online store", "Ready to approve", "on"], ["Landing page", "Paid"], ["Docs portal", "In progress"]].map(([n, s, on]) =>
-        <div key={n} className={`lp-mock-row ${on ? "on" : ""}`}><span className="lp-mock-dot" /><div><b>{n}</b><small>{s}</small></div></div>)}
+      <p className="lp-mock-title">Agreements <span>{agreements.length}</span></p>
+      {agreements.map(a => <div key={a.name} className={`lp-mock-row ${a.on ? "on" : ""}`}>
+        <span className="lp-mock-ava">{a.who.split(" ").map(w => w[0]).join("")}</span>
+        <div><b>{a.name}</b><small><i className={`dot ${a.tone}`} />{a.status}</small></div>
+      </div>)}
     </div>
     <div className="lp-mock-main">
       <div className="lp-mock-head">
-        <div><b>Online store</b><small>Checked against the live site · 2 min ago</small></div>
-        <span>$1,000</span>
+        <div><b>Online store</b><small>Maya Chen · freelancer</small></div>
+        <strong>$1,000.00</strong>
       </div>
-      <div className="lp-mock-feed">
-        {["Website loads securely", "Product catalog is on the site", "No placeholder text left"].map(t =>
-          <div key={t} className="lp-mock-check"><span><Check size={11} strokeWidth={3} /></span>{t}</div>)}
-        <div className="lp-mock-note">All requirements met — ready to pay</div>
+      <div className="lp-mock-progress"><span>Requirements</span><em>3 of 3 met</em><div><i /></div></div>
+      <ul className="lp-mock-checks">
+        {checks.map(([t, d]) => <li key={t}><span className="lp-mock-ok" /><div><b>{t}</b><small>{d}</small></div><em>Verified</em></li>)}
+      </ul>
+      <div className="lp-mock-pay">
+        <span>Approve and pay with</span>
+        <span className="lp-mock-pp"><PayPalMark /></span>
       </div>
     </div>
   </div>;
@@ -90,7 +111,6 @@ export default function Landing() {
       <nav className="lp-pill" aria-label="Main">
         {nav.map(n => <a key={n.href} href={n.href} className={active === n.href ? "on" : ""} onClick={() => setMenu(false)}>{n.label}</a>)}
       </nav>
-      <a href="/app" className="lp-nav-cta"><ShieldCheck size={16} /> Open workspace</a>
       <button className="lp-burger" aria-label="Menu" aria-expanded={menu} onClick={() => setMenu(!menu)}><span /><span /></button>
     </header>
 
@@ -98,27 +118,31 @@ export default function Landing() {
       <div className="lp-hero-grid">
         <div className="lp-hero-copy">
           <h1>Ship the work.<br />Get it paid.</h1>
+          <p className="lp-hero-sub">Agree on what “done” means, prove it was delivered, and get paid through PayPal.</p>
           <a href="/app" className="lp-cta">Start an agreement <span><ArrowRight size={17} /></span></a>
-        </div>
-
-        <div className="lp-device">
-          <div className="lp-device-frame">
-            <span className="lp-device-mark"><Mark /></span>
-            <span className="lp-device-seal"><Check size={30} strokeWidth={2.6} /></span>
-            <span className="lp-device-label">3 of 3 verified</span>
-          </div>
-          <p>Checked<br />before you pay</p>
-        </div>
-
-        <p className="lp-tagline">Clear terms meet<br />work you can prove</p>
-
-        <div className="lp-badge">
-          <span className="lp-badge-icon"><ShieldCheck size={24} /></span>
-          <strong>PayPal</strong>
-          <small>Sandbox checkout</small>
         </div>
       </div>
       <div className="lp-mock-wrap"><ProductPreview /></div>
+    </section>
+
+    <section className="lp-built" aria-label="Built with PayPal">
+      <span>Payments built with</span><PayPalMark className="lp-built-logo" />
+    </section>
+
+    <section id="paypal" className="lp-section lp-paypal">
+      <div className="lp-head" data-reveal>
+        <p className="lp-eyebrow">Powered by PayPal</p>
+        <h2>The money moves only when the work is proven</h2>
+        <p className="lp-lead">PayPal isn’t an add-on here. It decides who gets paid, what the payment is for, and when it counts as paid.</p>
+      </div>
+      <div className="lp-pp-grid">
+        {paypalPoints.map((p, i) => <article key={p.title} className="lp-pp-card" data-reveal style={{ ["--d" as string]: `${i * 70}ms` }}>
+          <span className="lp-pp-n">{String(i + 1).padStart(2, "0")}</span>
+          <p.icon size={22} className="lp-pp-icon" />
+          <h3>{p.title}</h3>
+          <p>{p.body}</p>
+        </article>)}
+      </div>
     </section>
 
     <section id="how" className="lp-section">
@@ -191,7 +215,7 @@ export default function Landing() {
           <div><h4>Trust</h4><a href="#faq">How checks work</a><a href="/privacy">Privacy policy</a><a href="/terms">Terms of service</a></div>
           <div><h4>Connect</h4><a href="https://github.com/codewithanshuman/savepal" target="_blank" rel="noopener noreferrer" className="lp-social"><svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><path fill="currentColor" d="M12 .5a11.5 11.5 0 0 0-3.64 22.41c.58.1.79-.25.79-.56v-2c-3.2.7-3.88-1.37-3.88-1.37-.53-1.33-1.28-1.69-1.28-1.69-1.05-.71.08-.7.08-.7 1.16.08 1.77 1.19 1.77 1.19 1.03 1.76 2.7 1.25 3.36.96.1-.75.4-1.25.73-1.54-2.55-.29-5.24-1.28-5.24-5.68 0-1.26.45-2.28 1.19-3.09-.12-.29-.52-1.46.11-3.05 0 0 .97-.31 3.17 1.18a11 11 0 0 1 5.77 0c2.2-1.49 3.17-1.18 3.17-1.18.63 1.59.23 2.76.11 3.05.74.81 1.19 1.83 1.19 3.09 0 4.41-2.69 5.38-5.26 5.67.41.36.78 1.06.78 2.14v3.17c0 .31.21.67.8.56A11.5 11.5 0 0 0 12 .5Z"/></svg>GitHub</a></div>
         </div>
-        <p className="lp-footer-copy">© {new Date().getFullYear()} SavePal. Built for the PayPal sandbox.</p>
+        <div className="lp-footer-copy"><span>© {new Date().getFullYear()} SavePal · PayPal sandbox</span><span className="lp-footer-built">Built with <PayPalMark /></span></div>
         <div className="lp-footer-art" aria-hidden="true" />
       </div>
     </footer>

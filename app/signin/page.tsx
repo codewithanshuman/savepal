@@ -27,7 +27,7 @@ export default async function SignIn({ searchParams }: { searchParams: Promise<R
   const error = typeof params.error === "string" ? errors[params.error] : undefined;
   const query = `?return_to=${encodeURIComponent(returnTo)}`;
   return <main className="signin">
-    <a href="/" className="signin-brand"><svg viewBox="0 0 24 24" width="22" height="22" aria-hidden="true"><path fill="currentColor" d="M12 2.5 4 5.6v6.1c0 4.7 3.3 8.6 8 9.8 4.7-1.2 8-5.1 8-9.8V5.6L12 2.5Zm-1.2 13.2-3.6-3.6 1.4-1.4 2.2 2.2 4.6-4.6 1.4 1.4-6 6Z"/></svg>savepal</a>
+    <a href="/" className="signin-brand">savepal</a>
     <section className="signin-card">
       <h1>Sign in to SavePal</h1>
       <p className="signin-sub">Use the account whose email your client invited, or any account to create agreements.</p>
