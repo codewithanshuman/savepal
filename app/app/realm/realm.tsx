@@ -25,6 +25,8 @@ const kindTag: Record<string, string> = { VISIT: "VISIT", FINDING: "REPORT", THI
 /** Building plots on the island: south of the town road, then north of it. */
 const PLOTS: Array<[number, number]> = [[1.4, 13.1], [3.6, 13.1], [5.8, 13.1], [10.0, 13.1], [12.2, 13.1], [14.4, 13.1], [2.2, 9.3], [4.6, 9.3], [11.0, 9.3], [13.6, 9.3]];
 const CREW_HUES = ["#2f5fbe", "#7a5aa8", "#1f9e62"];
+/** Native-pixel bounds of the island and its harbour: what the camera frames. */
+const ISLAND = { x0: 78, x1: 668, y0: 34, y1: 414 };
 
 async function api(payload: Record<string, unknown>) {
   const res = await fetch("/api/workspace", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload) });
@@ -42,6 +44,7 @@ export default function Realm({ id }: { id: string }) {
   const [error, setError] = useState("");
   const [picked, setPicked] = useState<House | null>(null);
   const [cam, setCam] = useState({ k: 0, x: 0, y: 0 });
+  const [logOpen, setLogOpen] = useState(true);
   const canvas = useRef<HTMLCanvasElement>(null);
   const stage = useRef<HTMLDivElement>(null);
   const cursor = useRef(0);
@@ -183,19 +186,34 @@ export default function Realm({ id }: { id: string }) {
     return () => cancelAnimationFrame(frame);
   }, [project]);
 
-  /* ── camera: integer zoom keeps pixels square ── */
+  /* ── camera: frame the island itself (not the empty sea) in the space the panels leave ── */
+  const fitView = useCallback((logOpen: boolean) => {
+    const el = stage.current; if (!el) return;
+    const vw = el.clientWidth, vh = el.clientHeight, wide = vw > 900;
+    const left = wide ? 24 : 12, right = wide ? (logOpen ? 330 : 24) : 12, top = wide ? 120 : 150, bottom = wide ? 90 : (logOpen ? 40 * vh / 100 + 90 : 90);
+    const freeW = vw - left - right, freeH = vh - top - bottom;
+    const k = Math.min(4, Math.max(1, Math.floor(Math.min(freeW / (ISLAND.x1 - ISLAND.x0), freeH / (ISLAND.y1 - ISLAND.y0)) * 10) / 10));
+    const cx = (ISLAND.x0 + ISLAND.x1) / 2, cy = (ISLAND.y0 + ISLAND.y1) / 2;
+    const fx = left + freeW / 2 - vw / 2, fy = top + freeH / 2 - vh / 2;
+    setCam({ k, x: fx - (cx - NATIVE_W / 2) * k, y: fy - (cy - NATIVE_H / 2) * k });
+  }, []);
   useEffect(() => {
-    const fit = () => {
-      const el = stage.current; if (!el) return;
-      // Fit the island to the space left of the log panel on wide screens.
-      const wide = el.clientWidth > 900, freeW = el.clientWidth - (wide ? 340 : 0), freeH = el.clientHeight - (wide ? 110 : 260);
-      const k = Math.max(1, Math.floor(Math.min(freeW / NATIVE_W, freeH / NATIVE_H) * 10) / 10);
-      setCam(c => c.k ? c : { k, x: wide ? -160 : 0, y: wide ? -10 : -110 });
-    };
-    fit(); window.addEventListener("resize", fit);
-    return () => window.removeEventListener("resize", fit);
-  }, [project]);
-  const onWheel = (e: React.WheelEvent) => setCam(c => ({ ...c, k: Math.min(5, Math.max(1, c.k + (e.deltaY < 0 ? .5 : -.5))) }));
+    if (!project) return;
+    fitView(logOpen);
+    const onResize = () => fitView(logOpen);
+    window.addEventListener("resize", onResize);
+    return () => window.removeEventListener("resize", onResize);
+  }, [project, logOpen, fitView]);
+  /** Zooms around a screen point (relative to the stage centre) so the building under it stays put. */
+  const zoomAt = (px: number, py: number, dir: 1 | -1) => setCam(c => {
+    const k = Math.min(5, Math.max(1, Math.round((c.k + dir * .4) * 10) / 10));
+    const nx = (px - c.x) / c.k, ny = (py - c.y) / c.k;
+    return { k, x: px - nx * k, y: py - ny * k };
+  });
+  const onWheel = (e: React.WheelEvent) => {
+    const r = stage.current!.getBoundingClientRect();
+    zoomAt(e.clientX - r.left - r.width / 2, e.clientY - r.top - r.height / 2, e.deltaY < 0 ? 1 : -1);
+  };
   const onDown = (e: React.PointerEvent) => { drag.current = { x: e.clientX, y: e.clientY, cx: cam.x, cy: cam.y, moved: false }; };
   const onMove = (e: React.PointerEvent) => {
     const d = drag.current; if (!d) return;
@@ -251,8 +269,14 @@ export default function Realm({ id }: { id: string }) {
       {days !== null && <div className="hud-meter" aria-label={`${days} of 29 days left on the hold`}>{Array.from({ length: 29 }, (_, i) => <i key={i} className={i < days ? "on" : ""} />)}</div>}
     </section>
 
-    <aside className="hud hud-log" aria-label="Inspector's log">
-      <div className="hud-bar"><span>INSPECTOR’S LOG</span><i />{running ? <em className="hud-live">ON PATROL</em> : <em>{run?.status === "DONE" ? "SEALED" : "IDLE"}</em>}</div>
+    <div className="hud hud-zoom" role="group" aria-label="Zoom">
+      <button onClick={() => zoomAt(0, 0, 1)} aria-label="Zoom in">+</button>
+      <button onClick={() => zoomAt(0, 0, -1)} aria-label="Zoom out">−</button>
+      <button onClick={() => fitView(logOpen)} aria-label="Fit the kingdom">FIT</button>
+    </div>
+
+    <aside className={`hud hud-log ${logOpen ? "" : "closed"}`} aria-label="Inspector's log">
+      <div className="hud-bar"><span>INSPECTOR’S LOG</span><i />{running ? <em className="hud-live">ON PATROL</em> : <em>{run?.status === "DONE" ? "SEALED" : "IDLE"}</em>}<button onClick={() => setLogOpen(!logOpen)} aria-expanded={logOpen} aria-label={logOpen ? "Hide the log" : "Show the log"}>{logOpen ? "HIDE" : "SHOW"}</button></div>
       <div className="hud-stats"><div><small>PAGES READ</small><b>{run?.pages_read ?? 0}<span>/8</span></b></div><div><small>STEP</small><b>{run?.steps ?? 0}<span>/12</span></b></div><div><small>FINDINGS</small><b>{Object.keys(crewFindings).length}<span>/{project.criteria.length}</span></b></div></div>
       <ol className="hud-events">
         {events.length === 0 && <li className="hud-ev muted">{canDispatch ? "The radio is quiet. Dispatch the inspectors to read the delivered site." : project.evidence_url ? "The client can dispatch the inspectors." : "The inspectors await the freelancer’s delivery."}</li>}
@@ -264,7 +288,7 @@ export default function Realm({ id }: { id: string }) {
       <p className="hud-note">The crew only reads pages. Its report is advice — only the client’s seal releases the gold.</p>
     </aside>
 
-    <nav className="hud hud-banners" aria-label="Requirements">
+    <nav className="hud hud-banners" aria-label="Requirements" style={logOpen ? undefined : { right: 18 }}>
       {project.criteria.map((c, i) => { const v = crewFindings[i]?.verdict ?? project.findings?.[i]?.status ?? null; return <div key={i} className={`hud-banner ${v ? `v-${v.toLowerCase()}` : ""}`} title={c.label}><b>{i + 1}</b><span>{c.label}</span></div>; })}
     </nav>
 

@@ -89,3 +89,14 @@
   .realm-hint{display:none}
 }
 @media (prefers-reduced-motion:reduce){.realm *{animation:none!important;transition:none!important}}
+
+/* zoom controls and the folding log */
+.hud-zoom{left:18px;bottom:84px;display:flex;flex-direction:column;gap:4px;padding:6px}
+.hud-zoom button{width:40px;height:34px;border:1px solid rgba(255,255,255,.14);background:rgba(255,255,255,.04);color:#e8edf5;font:400 15px "Silkscreen",monospace;cursor:pointer}
+.hud-zoom button:last-child{font-size:10px;letter-spacing:1px}
+.hud-zoom button:hover{background:rgba(224,164,0,.18);border-color:#e0a400;color:#ffd15c}
+.hud-log.closed{bottom:auto;height:auto}
+.hud-log.closed>*:not(.hud-bar){display:none}
+.hud-log.closed .hud-bar{margin-bottom:0}
+.hud-banners{transition:right .2s}
+@media (max-width:900px){.hud-zoom{bottom:auto;top:150px;left:auto;right:12px}}
