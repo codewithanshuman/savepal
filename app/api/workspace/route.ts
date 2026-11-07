@@ -1,6 +1,10 @@
 import { env } from "cloudflare:workers";
 import { getChatGPTUser } from "../../chatgpt-auth";
-import { CHECKER_VERSION, parseUsdCents, readBoundedHtml, safeWebsiteUrl, type Criterion, type Finding, type WebsiteResult } from "../../../lib/assurance";
+import { CHECKER_VERSION, parseUsdCents, readBoundedHtml, safeWebsiteUrl, validateCriteria, type Criterion, type Finding, type WebsiteResult } from "../../../lib/assurance";
+import { approvalViolation, decisionGate, parseMaxRevisions, revisionAllowance } from "../../../lib/decision-policy";
+import { revisionHistory } from "../../../lib/revision-diff";
+import { consentState, termsFingerprint, termsHash } from "../../../lib/terms-consent";
+import { findingConfidence, type AdvancedFinding } from "../../../lib/website-evidence";
 import { appendAudit, verifyAudit } from "../../../lib/audit";
 import { captureWebsite, evaluateSnapshot, sha256, snapshotManifest, validateSnapshot } from "../../../lib/website-evidence";
 import { reviewWithAi } from "../../../lib/ai-verification";
@@ -27,6 +31,8 @@ type Project = StoredApprovalProject & {
   payment_capture_requested_at: string | null;
   seller_merchant_id: string | null; seller_verified_at: string | null;
   payment_recipient_merchant_id: string | null; payment_last_reconciled_at: string | null;
+  max_revisions: number | null; revision_count: number;
+  terms_hash: string | null; accepted_terms_hash: string | null; accepted_at: string | null;
   created_at: string; updated_at: string;
 };
 type EvidenceSubmission = { id: string; project_id: string; submission_hash: string; snapshot_hash: string; snapshot_key: string; manifest_json: string; created_at: string };
@@ -51,18 +57,35 @@ function role(p: Project, user: { userId: string; email: string }) {
   if (p.freelancer_email.toLowerCase() === user.email.toLowerCase()) return "freelancer";
   return null;
 }
-function view(p: Project, user: { userId: string; email: string }) {
+async function view(p: Project, user: { userId: string; email: string }) {
   const staleEvaluation = p.status === "EVALUATING" && new Date(p.updated_at).getTime() < Date.now() - 5 * 60_000;
+  const criteria = JSON.parse(p.criteria_json) as Criterion[];
+  const findings = p.findings_json ? JSON.parse(p.findings_json) as AdvancedFinding[] : null;
+  const consent = await consentState(p);
+  let gate = null;
+  try { gate = findings ? decisionGate(criteria,findings) : null; } catch { gate = null; }
   return {
     ...p,
     status: staleEvaluation ? "SUBMITTED" : p.status,
     role: role(p, user),
-    criteria: JSON.parse(p.criteria_json) as Criterion[],
-    findings: p.findings_json ? JSON.parse(p.findings_json) as Finding[] : null,
+    criteria,
+    findings: findings?.map(f => ({ ...f, confidence: findingConfidence(f) })) ?? null,
+    gate,
+    revisions: { max: p.max_revisions, used: p.revision_count, ...revisionAllowance(p.max_revisions,p.revision_count) },
+    consent: { ...consent, fingerprint: termsFingerprint(consent.termsHash) },
     criteria_json: undefined, findings_json: undefined, payment_request_id: undefined,
     payment_capture_request_id: undefined, audit_head_hash: undefined,
     paymentAwaitingReconciliation: !!p.payment_request_id || !!p.paypal_order_id,
   };
+}
+
+/** Refuses to act on an agreement whose locked terms no longer match what both parties bound. */
+async function termsIntact(p: Project): Promise<string | null> {
+  const consent = await consentState(p);
+  if (consent.legacy) return null;
+  if (consent.tampered) return "Locked agreement terms changed after they were agreed; this agreement is frozen";
+  if (!consent.freelancerBound) return "The freelancer has not accepted these exact terms";
+  return null;
 }
 
 export async function GET(request: Request) {
@@ -79,11 +102,13 @@ export async function GET(request: Request) {
     const approvalReceipt = p.approval_receipt_id ? await db().prepare("SELECT * FROM approval_receipts WHERE id=? AND project_id=?").bind(p.approval_receipt_id,id).first() : null;
     const paymentObservations = await db().prepare("SELECT id,source,provider_event_id,order_id,capture_id,provider_status,projected_status,amount_cents,currency,payload_hash,observed_at FROM payment_observations WHERE project_id=? ORDER BY observed_at DESC LIMIT 30").bind(id).all();
     const reconciliationAttempts = await db().prepare("SELECT id,source,outcome,detail,attempted_at FROM reconciliation_attempts WHERE project_id=? ORDER BY attempted_at DESC LIMIT 30").bind(id).all();
-    return json({ project: view(p, user), audit: audit.results, auditIntegrity, evidenceHistory: submissions.results.map(s => ({ ...s, manifest: JSON.parse(s.manifest_json), manifest_json: undefined })), verificationRun, approvalReceipt, paymentObservations: paymentObservations.results, reconciliationAttempts: reconciliationAttempts.results });
+    const runs = await db().prepare("SELECT id,submission_id,completed_at,findings_json FROM verification_runs WHERE project_id=? AND state='COMPLETED' ORDER BY completed_at ASC LIMIT 50").bind(id).all<{ id: string; submission_id: string | null; completed_at: string | null; findings_json: string | null }>();
+    const history = revisionHistory(JSON.parse(p.criteria_json) as Criterion[],runs.results);
+    return json({ project: await view(p, user), revisionHistory: history, audit: audit.results, auditIntegrity, evidenceHistory: submissions.results.map(s => ({ ...s, manifest: JSON.parse(s.manifest_json), manifest_json: undefined })), verificationRun, approvalReceipt, paymentObservations: paymentObservations.results, reconciliationAttempts: reconciliationAttempts.results });
   }
   const rows = await db().prepare("SELECT * FROM projects WHERE client_id = ? OR lower(freelancer_email) = ? ORDER BY created_at DESC")
     .bind(user.userId, user.email.toLowerCase()).all<Project>();
-  return json({ user: { name: user.displayName, email: user.email }, projects: rows.results.map(p => view(p, user)), paypalReady: !!(cfg.PAYPAL_CLIENT_ID && cfg.PAYPAL_CLIENT_SECRET && (cfg.PAYPAL_PARTNER_MERCHANT_ID ? safeMerchantId(cfg.PAYPAL_PARTNER_MERCHANT_ID) && cfg.PAYPAL_PARTNER_BN_CODE : safeMerchantId(cfg.PAYPAL_MERCHANT_ID))), sellerOnboardingReady: !!(cfg.PAYPAL_CLIENT_ID && cfg.PAYPAL_CLIENT_SECRET && safeMerchantId(cfg.PAYPAL_PARTNER_MERCHANT_ID) && cfg.PAYPAL_PARTNER_BN_CODE), paymentMode: cfg.PAYPAL_PARTNER_MERCHANT_ID ? "SELLER" : "MERCHANT", paypalClientId: cfg.PAYPAL_CLIENT_ID || null, paypalPartnerBnCode: cfg.PAYPAL_PARTNER_BN_CODE || null, aiReady: !!cfg.OPENAI_API_KEY });
+  return json({ user: { name: user.displayName, email: user.email }, projects: await Promise.all(rows.results.map(p => view(p, user))), paypalReady: !!(cfg.PAYPAL_CLIENT_ID && cfg.PAYPAL_CLIENT_SECRET && (cfg.PAYPAL_PARTNER_MERCHANT_ID ? safeMerchantId(cfg.PAYPAL_PARTNER_MERCHANT_ID) && cfg.PAYPAL_PARTNER_BN_CODE : safeMerchantId(cfg.PAYPAL_MERCHANT_ID))), sellerOnboardingReady: !!(cfg.PAYPAL_CLIENT_ID && cfg.PAYPAL_CLIENT_SECRET && safeMerchantId(cfg.PAYPAL_PARTNER_MERCHANT_ID) && cfg.PAYPAL_PARTNER_BN_CODE), paymentMode: cfg.PAYPAL_PARTNER_MERCHANT_ID ? "SELLER" : "MERCHANT", paypalClientId: cfg.PAYPAL_CLIENT_ID || null, paypalPartnerBnCode: cfg.PAYPAL_PARTNER_BN_CODE || null, aiReady: !!cfg.OPENAI_API_KEY });
 }
 
 async function inspectWebsite(url: string): Promise<WebsiteResult> {
@@ -133,14 +158,21 @@ export async function POST(request: Request) {
     const description = String(input.description || "").trim().slice(0, 2000);
     const freelancerEmail = String(input.freelancerEmail || "").trim().toLowerCase();
     const amountCents = parseUsdCents(input.amount);
-    const criteria = input.criteria;
+    const maxRevisions = parseMaxRevisions(input.maxRevisions);
     if (!title || !description || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(freelancerEmail) || freelancerEmail === user.email.toLowerCase() || amountCents === null) return fail("Enter a title, scope, a different freelancer email, and a USD amount from $1 to $1,000,000 with at most two decimals");
-    if (!Array.isArray(criteria) || criteria.length < 1 || criteria.length > 8 || !criteria.every(c => c && typeof c.label === "string" && c.label.trim().length > 2 && c.label.length <= 240 && ["reachable", "contains", "manual"].includes(c.kind) && (c.kind !== "contains" || (typeof c.needle === "string" && c.needle.trim().length > 0 && c.needle.length <= 100)))) return fail("Add 1–8 valid acceptance criteria");
+    if (maxRevisions === undefined) return fail("Revision limit must be a whole number from 0 to 20, or empty for no limit");
+    const checked = validateCriteria(input.criteria);
+    if ("error" in checked) return fail(checked.error);
     const id = crypto.randomUUID(), time = now();
-    await db().prepare("INSERT INTO projects (id,client_id,client_email,freelancer_email,title,description,amount_cents,currency,criteria_json,status,payment_status,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)")
-      .bind(id,user.userId,user.email,freelancerEmail,title,description,amountCents,"USD",JSON.stringify(criteria),"INVITED","NOT_STARTED",time,time).run();
-    await event(id,user.email,"AGREEMENT_CREATED","Version 1 accepted by client; awaiting freelancer acceptance. Criteria and amount are locked.");
-    return json({ id }, 201);
+    const criteriaJson = JSON.stringify(checked.criteria);
+    const terms = await termsHash({ id, client_id: user.userId, client_email: user.email, freelancer_email: freelancerEmail, title, description,
+      amount_cents: amountCents, currency: "USD", criteria_json: criteriaJson, max_revisions: maxRevisions,
+      status: "INVITED", evidence_hash: null, current_submission_id: null, latest_run_id: null, findings_json: null, audit_head_hash: null });
+    await db().prepare("INSERT INTO projects (id,client_id,client_email,freelancer_email,title,description,amount_cents,currency,criteria_json,status,payment_status,max_revisions,revision_count,terms_hash,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,0,?,?,?)")
+      .bind(id,user.userId,user.email,freelancerEmail,title,description,amountCents,"USD",criteriaJson,"INVITED","NOT_STARTED",maxRevisions,terms,time,time).run();
+    const required = checked.criteria.filter(c => c.required !== false).length;
+    await event(id,user.email,"AGREEMENT_CREATED",`Version 1 bound by client; terms ${terms} (${termsFingerprint(terms)}). ${checked.criteria.length} criteria (${required} required), ${maxRevisions === null ? "unlimited revisions" : `${maxRevisions} revision${maxRevisions === 1 ? "" : "s"}`}. Awaiting freelancer acceptance.`);
+    return json({ id, termsHash: terms }, 201);
   }
   const id = String(input.id || "");
   let p = await project(id);
@@ -150,9 +182,16 @@ export async function POST(request: Request) {
 
   if (action === "accept") {
     if (userRole !== "freelancer" || p.status !== "INVITED") return fail("Only the invited freelancer can accept this agreement", 403);
-    const changed = await db().prepare("UPDATE projects SET status='AGREED',updated_at=? WHERE id=? AND status='INVITED'").bind(now(),id).run();
+    const consent = await consentState(p);
+    if (consent.tampered) return fail("Locked agreement terms changed after the client bound them; this agreement cannot be accepted", 409);
+    // The freelancer must echo the terms hash they were shown, so consent is bound to exact terms.
+    if (!consent.legacy && input.termsHash !== consent.termsHash) return fail("These terms differ from the ones you reviewed; refresh and review them again", 409);
+    const time = now();
+    const changed = await db().prepare("UPDATE projects SET status='AGREED',accepted_terms_hash=?,accepted_at=?,updated_at=? WHERE id=? AND status='INVITED' AND terms_hash IS ?")
+      .bind(consent.legacy ? null : consent.termsHash,time,time,id,p.terms_hash).run();
     if (!changed.meta.changes) return fail("Agreement state changed; refresh and try again", 409);
-    await event(id,user.email,"AGREEMENT_ACCEPTED","Freelancer accepted agreement version 1.");
+    await event(id,user.email,"AGREEMENT_ACCEPTED",consent.legacy ? "Freelancer accepted agreement version 1." :
+      `Freelancer bound to terms ${consent.termsHash} (${termsFingerprint(consent.termsHash)}); both parties now hold the same terms.`);
     return json({ ok: true });
   }
 
@@ -280,20 +319,35 @@ export async function POST(request: Request) {
     if (action === "revise" && reason.length < 5) return fail("Explain the revision needed");
     const findings = p.findings_json ? JSON.parse(p.findings_json) as Finding[] : [];
     if (!p.latest_run_id || findings.length === 0) return fail("A completed verification run is required", 409);
-    if (action === "approve" && findings.some(f => f.status !== "VERIFIED") && reason.length < 5) return fail("Explain why you are approving an inconclusive or failed check");
+    const intact = await termsIntact(p);
+    if (intact) return fail(intact, 409);
     if (action === "approve") {
+      let gate;
+      try { gate = decisionGate(JSON.parse(p.criteria_json) as Criterion[],findings); }
+      catch { return fail("Findings do not match the agreement's criteria; run verification again", 409); }
+      const override = input.override === true;
+      const violation = approvalViolation(gate,reason,override);
+      if (violation) return fail(violation, 422);
+      // The override and the criteria it covers become part of the receipt's hashed reason.
+      const recorded = override
+        ? `OVERRIDE of required ${gate.blocking.map(b => `#${b.index + 1}`).join(", ")}: ${reason}`
+        : reason || "Client reviewed the evidence; every criterion verified.";
       try {
-        const receipt = await approveWithReceipt(db(),p,user.email,reason || "Client reviewed the evidence and approved.",cfg.AUDIT_HMAC_KEY);
-        return json({ ok: true, approvalReceiptId: receipt.id, approvalHash: receipt.receipt_hash });
+        const receipt = await approveWithReceipt(db(),p,user.email,recorded,cfg.AUDIT_HMAC_KEY);
+        if (override) await event(id,user.email,"POLICY_OVERRIDE",`Approved despite failed required criteria ${gate.blocking.map(b => `#${b.index + 1} “${b.label}”`).join("; ")}. Receipt ${receipt.receipt_hash}.`);
+        return json({ ok: true, approvalReceiptId: receipt.id, approvalHash: receipt.receipt_hash, mode: gate.mode });
       } catch (error) {
         return fail(error instanceof Error ? error.message : "Approval could not be recorded", 409);
       }
     }
-    const changed = await db().prepare("UPDATE projects SET status='REVISION_REQUESTED',decision_reason=?,updated_at=? WHERE id=? AND status='REVIEW' AND approval_receipt_id IS NULL")
-      .bind(reason,now(),id).run();
+    const allowance = revisionAllowance(p.max_revisions,p.revision_count);
+    if (allowance.exhausted) return fail(`The agreed limit of ${p.max_revisions} revision${p.max_revisions === 1 ? "" : "s"} is used up. Approve, approve with an override, or settle outside SavePal.`, 409);
+    const changed = await db().prepare("UPDATE projects SET status='REVISION_REQUESTED',decision_reason=?,revision_count=revision_count+1,updated_at=? WHERE id=? AND status='REVIEW' AND approval_receipt_id IS NULL AND revision_count=? AND (max_revisions IS NULL OR revision_count < max_revisions)")
+      .bind(reason,now(),id,p.revision_count).run();
     if (!changed.meta.changes) return fail("Milestone state changed; refresh and decide again", 409);
-    await event(id,user.email,"REVISION_REQUESTED",reason);
-    return json({ ok: true });
+    const used = p.revision_count + 1;
+    await event(id,user.email,"REVISION_REQUESTED",`Revision ${used}${p.max_revisions === null ? "" : ` of ${p.max_revisions}`}: ${reason}`);
+    return json({ ok: true, revisionsUsed: used });
   }
   if (action === "begin_seller_onboarding") {
     if (userRole !== "freelancer") return fail("Only the assigned freelancer can connect PayPal",403);
@@ -312,6 +366,8 @@ export async function POST(request: Request) {
     if (userRole !== "client" || p.status !== "APPROVED") return fail("Client approval is required", 403);
     if (["COMPLETED","PARTIALLY_REFUNDED","REFUNDED"].includes(p.payment_status)) return fail("This milestone already has a captured payment", 409);
     if (p.payment_status === "FAILED") return fail("This attempt failed; reconcile it before another payment", 409);
+    const intact = await termsIntact(p);
+    if (intact) return fail(intact, 409);
     try {
       const receipt = await requireApprovalReceipt(db(),p,cfg.AUDIT_HMAC_KEY);
       const client = paypal();

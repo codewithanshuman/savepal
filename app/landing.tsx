@@ -22,7 +22,8 @@ const steps = [
 const faqs = [
   { q: "Does SavePal move real money?", a: "No. SavePal only talks to PayPal sandbox endpoints. It is built to demonstrate a verifiable path from delivery to payment, and has no production payment mode." },
   { q: "Who decides whether the work is accepted?", a: "The client, always. Objective checks and the optional AI review prepare evidence, but they cannot approve work or authorize payment on their own." },
-  { q: "What exactly gets verified?", a: "Each criterion is checked against a time-stamped snapshot of the submitted site: HTTPS reachability, whole-phrase text matches in visible HTML, or a flag for human review. Anything that can't be proven is marked inconclusive." },
+  { q: "What exactly gets verified?", a: "Each criterion is checked against a time-stamped snapshot and again on the live site: reachability, visible text that must appear or must not, the page title, a named link or button, a specific page path, and broken pages. Anything SavePal can't prove, including absence on a partly-read site, is marked inconclusive rather than guessed." },
+  { q: "What stops someone waving a failed check through?", a: "Each criterion is marked required or optional when the agreement is created. A failed required criterion blocks approval; the client can only proceed with an explicit override, and that override is written into the approval receipt." },
   { q: "Can someone change the record after the fact?", a: "Agreements, submissions and receipts are immutable, and every agreement keeps an append-only audit hash chain. An optional HMAC key protects that chain against database-only tampering." },
   { q: "Can I check a result without trusting the server?", a: "Yes. Agreement members can download a proof bundle and replay the objective findings offline with the included verification script." },
 ];

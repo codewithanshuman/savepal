@@ -1,7 +1,56 @@
-export const CHECKER_VERSION = "website-v4";
+export const CHECKER_VERSION = "website-v5";
 export const MAX_HTML_BYTES = 100_000;
 
-export type Criterion = { label: string; kind: "reachable" | "contains" | "manual"; needle?: string };
+export const CRITERION_KINDS = ["reachable", "contains", "absent", "title", "link", "path", "no_broken_pages", "manual"] as const;
+export type CriterionKind = typeof CRITERION_KINDS[number];
+/** Kinds whose check is parameterised by `needle` (a phrase, or a path for `path`). */
+export const NEEDLE_KINDS: ReadonlySet<CriterionKind> = new Set(["contains", "absent", "title", "link", "path"]);
+export const MAX_PATH_CRITERIA = 4;
+/** `required` is absent on agreements created before acceptance policies; those are treated as required. */
+export type Criterion = { label: string; kind: CriterionKind; needle?: string; required?: boolean };
+
+export const isRequired = (c: Criterion) => c.required !== false;
+
+/** A same-origin absolute path such as `/pricing`; no scheme, host, query, fragment or traversal. */
+export function safeCriterionPath(raw: unknown): string | null {
+  if (typeof raw !== "string") return null;
+  const path = raw.trim();
+  if (!/^\/[A-Za-z0-9\-._~/%]{0,199}$/.test(path) || path.startsWith("//") || /(^|\/)\.\.?(\/|$)/.test(path)) return null;
+  return path;
+}
+
+/** Validates untrusted criteria input and returns a normalised copy, or an error message. */
+export function validateCriteria(raw: unknown): { criteria: Criterion[] } | { error: string } {
+  if (!Array.isArray(raw) || raw.length < 1 || raw.length > 8) return { error: "Add 1–8 acceptance criteria" };
+  const criteria: Criterion[] = [];
+  for (const [index, item] of raw.entries()) {
+    const n = index + 1;
+    if (!item || typeof item !== "object") return { error: `Criterion ${n} is invalid` };
+    const c = item as Record<string, unknown>;
+    const label = typeof c.label === "string" ? c.label.trim() : "";
+    if (label.length < 3 || label.length > 240) return { error: `Criterion ${n} needs a description of 3–240 characters` };
+    if (!CRITERION_KINDS.includes(c.kind as CriterionKind)) return { error: `Criterion ${n} has an unknown check type` };
+    const kind = c.kind as CriterionKind;
+    const criterion: Criterion = { label, kind, required: c.required !== false };
+    if (NEEDLE_KINDS.has(kind)) {
+      if (kind === "path") {
+        const path = safeCriterionPath(c.needle);
+        if (!path) return { error: `Criterion ${n} needs a site path such as /pricing` };
+        criterion.needle = path;
+      } else {
+        const needle = typeof c.needle === "string" ? c.needle.trim() : "";
+        if (!needle || needle.length > 100 || !/[\p{L}\p{N}]/u.test(needle)) return { error: `Criterion ${n} needs 1–100 characters of text with at least one letter or digit` };
+        criterion.needle = needle;
+      }
+    }
+    criteria.push(criterion);
+  }
+  if (criteria.filter(c => c.kind === "path").length > MAX_PATH_CRITERIA) return { error: `Use at most ${MAX_PATH_CRITERIA} page-path checks` };
+  const keys = criteria.map(c => `${c.kind}:${(c.needle || c.label).toLowerCase()}`);
+  if (new Set(keys).size !== keys.length) return { error: "Two criteria check the same thing; merge or change one" };
+  if (!criteria.some(isRequired)) return { error: "Mark at least one criterion as required" };
+  return { criteria };
+}
 export type Finding = { label: string; status: "VERIFIED" | "FAILED" | "INCONCLUSIVE"; explanation: string; check: string };
 export type WebsiteResult = { status: number; body: string; contentType: string; truncated: boolean; error?: string };
 export type PaymentStatus = "NOT_STARTED" | "PENDING" | "COMPLETED" | "FAILED" | "PARTIALLY_REFUNDED" | "REFUNDED";

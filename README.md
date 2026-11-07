@@ -5,7 +5,11 @@ SavePal links a locked website milestone, evidence, objective verification, a cl
 ## What works
 
 - ChatGPT sign-in and server-side client/freelancer access checks
-- Client-created milestones with locked scope, USD amount, and 1–8 criteria
+- Client-created milestones with locked scope, USD amount, an agreed revision limit, and 1–8 criteria, each marked required or optional
+- Eight objective check types replayable offline from the snapshot: reachable, text present, text absent, page title, link or button label, named page path, no broken pages, and human review. Absence and "not found" are only claimed when every captured page was read, submitted and live.
+- Two-sided consent: a terms hash binds the client at creation and the freelancer at acceptance (the freelancer must echo the hash they reviewed). Any later change to locked terms freezes approval and payment.
+- Acceptance policy: a failed required criterion blocks approval unless the client records an explicit override, which is written into the receipt; unproven required criteria need a confirmation note
+- Revision intelligence: per-criterion improved/regressed history across verification runs, a progress score, detection of regressions without a new submission, and enforcement of the revision limit
 - Freelancer acceptance and HTTPS evidence submission with a private, time-stamped website snapshot
 - Up to six bounded, same-origin pages per submission, selected with the locked criteria in mind, each with a SHA-256 hash and structural signals
 - Immutable submission records and an inspectable snapshot manifest; the raw snapshot is available to agreement members at `GET /api/evidence?projectId=...&submissionId=...`
@@ -37,6 +41,7 @@ node --import ./scripts/sites-env.mjs ./node_modules/wrangler/bin/wrangler.js d1
 node --import ./scripts/sites-env.mjs ./node_modules/wrangler/bin/wrangler.js d1 execute DB --local --config dist/server/wrangler.json --persist-to .wrangler/state --file drizzle/0003_late_bloodscream.sql
 node --import ./scripts/sites-env.mjs ./node_modules/wrangler/bin/wrangler.js d1 execute DB --local --config dist/server/wrangler.json --persist-to .wrangler/state --file drizzle/0004_foamy_kate_bishop.sql
 node --import ./scripts/sites-env.mjs ./node_modules/wrangler/bin/wrangler.js d1 execute DB --local --config dist/server/wrangler.json --persist-to .wrangler/state --file drizzle/0005_shiny_jean_grey.sql
+node --import ./scripts/sites-env.mjs ./node_modules/wrangler/bin/wrangler.js d1 execute DB --local --config dist/server/wrangler.json --persist-to .wrangler/state --file drizzle/0006_fantastic_changeling.sql
 npm run dev -- --port 5174
 ```
 

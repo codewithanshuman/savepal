@@ -33,6 +33,11 @@ export const projects = sqliteTable("projects", {
   paymentLastReconciledAt: text("payment_last_reconciled_at"),
   latestRunId: text("latest_run_id"),
   auditHeadHash: text("audit_head_hash"),
+  maxRevisions: integer("max_revisions"),
+  revisionCount: integer("revision_count").notNull().default(0),
+  termsHash: text("terms_hash"),
+  acceptedTermsHash: text("accepted_terms_hash"),
+  acceptedAt: text("accepted_at"),
   createdAt: text("created_at").notNull(),
   updatedAt: text("updated_at").notNull(),
 });
