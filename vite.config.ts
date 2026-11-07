@@ -15,15 +15,25 @@ const { d1, r2 } = hostingConfig;
 const isCodexSeatbeltSandbox = process.env.CODEX_SANDBOX === "seatbelt";
 const managedLinux = readExecutionProfile() === "managed-linux";
 
+// Cloudflare deployment: set these when building for production (see README "Deploy to
+// Cloudflare"). Unset, the local placeholders keep development data where it was.
+const deploy = {
+  worker: process.env.SAVEPAL_WORKER_NAME,
+  d1Name: process.env.SAVEPAL_D1_NAME || "site-creator-d1",
+  d1Id: process.env.SAVEPAL_D1_ID || SITE_CREATOR_PLACEHOLDER_DATABASE_ID,
+  r2Bucket: process.env.SAVEPAL_R2_BUCKET || "site-creator-r2",
+};
+
 const localBindingConfig = {
+  ...(deploy.worker ? { name: deploy.worker } : {}),
   main: "./worker/index.ts",
   compatibility_flags: ["nodejs_compat"],
   d1_databases: d1
     ? [
         {
           binding: d1,
-          database_name: "site-creator-d1",
-          database_id: SITE_CREATOR_PLACEHOLDER_DATABASE_ID,
+          database_name: deploy.d1Name,
+          database_id: deploy.d1Id,
         },
       ]
     : [],
@@ -31,7 +41,7 @@ const localBindingConfig = {
     ? [
         {
           binding: r2,
-          bucket_name: "site-creator-r2",
+          bucket_name: deploy.r2Bucket,
         },
       ]
     : [],

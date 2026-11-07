@@ -1,5 +1,5 @@
 import { env } from "cloudflare:workers";
-import { getChatGPTUser } from "../../chatgpt-auth";
+import { getUser } from "../../auth";
 import { CHECKER_VERSION, parseUsdCents, readBoundedHtml, safeWebsiteUrl, validateCriteria, type Criterion, type Finding, type WebsiteResult } from "../../../lib/assurance";
 import { approvalViolation, decisionGate, parseMaxRevisions, revisionAllowance } from "../../../lib/decision-policy";
 import { revisionHistory } from "../../../lib/revision-diff";
@@ -89,7 +89,7 @@ async function termsIntact(p: Project): Promise<string | null> {
 }
 
 export async function GET(request: Request) {
-  const user = await getChatGPTUser();
+  const user = await getUser();
   if (!user) return fail("Sign in is required", 401);
   const id = new URL(request.url).searchParams.get("id");
   if (id) {
@@ -148,7 +148,7 @@ function paymentExpectation(p: Project, customId: string): ExpectedPayment {
 }
 
 export async function POST(request: Request) {
-  const user = await getChatGPTUser();
+  const user = await getUser();
   if (!user) return fail("Sign in is required", 401);
   let input: Record<string, unknown>;
   try { input = await request.json() as Record<string, unknown>; } catch { return fail("Invalid JSON"); }

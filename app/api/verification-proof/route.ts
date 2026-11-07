@@ -1,5 +1,5 @@
 import { env } from "cloudflare:workers";
-import { getChatGPTUser } from "../../chatgpt-auth";
+import { getUser } from "../../auth";
 import { verifyAudit } from "../../../lib/audit";
 import { replayVerification, type VerificationArtifact } from "../../../lib/verification-proof";
 import { sha256, validateSnapshot } from "../../../lib/website-evidence";
@@ -10,7 +10,7 @@ const cfg = env as Cloudflare.Env & { AUDIT_HMAC_KEY?: string };
 const fail = (message: string, status: number) => Response.json({ error: message }, { status, headers: { "Cache-Control": "no-store" } });
 
 export async function GET(request: Request) {
-  const user = await getChatGPTUser();
+  const user = await getUser();
   if (!user) return fail("Sign in is required",401);
   if (!env.DB || !env.BUCKET) return fail("Verification storage is unavailable",503);
   const url = new URL(request.url);

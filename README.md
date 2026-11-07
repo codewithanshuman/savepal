@@ -45,11 +45,37 @@ node --import ./scripts/sites-env.mjs ./node_modules/wrangler/bin/wrangler.js d1
 npm run dev -- --port 5174
 ```
 
-Open the printed local URL, then visit `/signin-with-chatgpt?return_to=/` for the starter's local test identity. Hosted authentication is supplied by Sites.
+Open the printed local URL and go to `/app`. The sign-in page offers **Continue as local test user**, which exists only on the local dev server.
+
+## Sign-in
+
+Production sign-in is Google and/or GitHub OAuth with a signed, HttpOnly session cookie (`lib/session.ts`, `lib/oauth.ts`, `app/auth.ts`). Only a provider-verified email is accepted, because the freelancer on an agreement is matched by email. Identity headers are never trusted outside local development; the production build contains no code that reads them.
+
+| Variable | Kind | Purpose |
+| --- | --- | --- |
+| `SESSION_SECRET` | secret, 32+ chars | Signs session and OAuth-state cookies. Changing it signs everyone out. |
+| `SITE_ORIGIN` | var | Public origin, e.g. `https://savepal.example.workers.dev`. Used for OAuth callbacks. |
+| `GITHUB_CLIENT_ID`, `GITHUB_CLIENT_SECRET` | secret | GitHub OAuth App. Callback: `SITE_ORIGIN/auth/github/callback`. |
+| `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET` | secret | Google OAuth client (Web). Redirect URI: `SITE_ORIGIN/auth/google/callback`. |
+
+A provider button appears only when both of its values and `SESSION_SECRET` are set.
+
+## Deploy to Cloudflare
+
+```sh
+npx wrangler login
+npx wrangler d1 create savepal-db                 # note the database_id it prints
+npx wrangler r2 bucket create savepal-evidence
+SAVEPAL_WORKER_NAME=savepal SAVEPAL_D1_NAME=savepal-db SAVEPAL_D1_ID=<database_id> SAVEPAL_R2_BUCKET=savepal-evidence npm run build
+for f in drizzle/0*.sql; do npx wrangler d1 execute DB --remote --config dist/server/wrangler.json --file "$f"; done
+npx wrangler deploy --config dist/server/wrangler.json
+```
+
+Then set the variables above with `npx wrangler secret put NAME --config dist/server/wrangler.json`, plus `AUDIT_HMAC_KEY` (random, 32+ chars, keep it stable) and any PayPal values below. Rebuild with the same `SAVEPAL_*` variables before every deploy.
 
 ## Hosted configuration
 
-Set `PAYPAL_CLIENT_ID` (browser-safe), `PAYPAL_CLIENT_SECRET` (secret), and `PAYPAL_WEBHOOK_ID` (secret) in Sites runtime environment variables. Use a PayPal **sandbox** REST app. Register `https://YOUR-SITE/api/paypal/webhook` for capture completed, pending, denied, declined, refunded, and partially refunded events. The app never calls PayPal live endpoints. Refund state advances from completed to partially refunded or refunded; the observation history retains each provider response.
+Set `PAYPAL_CLIENT_ID` (browser-safe), `PAYPAL_CLIENT_SECRET` (secret), and `PAYPAL_WEBHOOK_ID` (secret) as Worker secrets (see above). Use a PayPal **sandbox** REST app. Register `https://YOUR-SITE/api/paypal/webhook` for capture completed, pending, denied, declined, refunded, and partially refunded events. The app never calls PayPal live endpoints. Refund state advances from completed to partially refunded or refunded; the observation history retains each provider response.
 
 For direct merchant sandbox checkout, set `PAYPAL_MERCHANT_ID` to the REST app owner's 13-character sandbox merchant ID. This sends money to that merchant, so it is not a freelancer payout. For freelancer-directed checkout, use a PayPal multiparty partner app and set `PAYPAL_PARTNER_MERCHANT_ID` (partner merchant ID), `PAYPAL_PARTNER_BN_CODE`, and `SITE_ORIGIN` (public HTTPS origin). The freelancer then connects their sandbox seller account through PayPal. Checkout stays unavailable until PayPal confirms receivable status, email, third-party payment permission, and the app's client ID. Partner access and sandbox seller accounts must be obtained from PayPal; adding keys alone cannot grant partner capability.
 

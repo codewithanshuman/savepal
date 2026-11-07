@@ -1,12 +1,12 @@
 import { env } from "cloudflare:workers";
-import { getChatGPTUser } from "../../chatgpt-auth";
+import { getUser } from "../../auth";
 import { validateSnapshot } from "../../../lib/website-evidence";
 import { sha256Bytes } from "../../../lib/browser-evidence";
 
 export const runtime = "edge";
 
 export async function GET(request: Request) {
-  const user = await getChatGPTUser();
+  const user = await getUser();
   if (!user) return Response.json({ error: "Sign in is required" }, { status: 401 });
   if (!env.DB || !env.BUCKET) return Response.json({ error: "Evidence storage is unavailable" }, { status: 503 });
   const url = new URL(request.url);

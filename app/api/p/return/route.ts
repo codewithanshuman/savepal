@@ -1,5 +1,5 @@
 import { env } from "cloudflare:workers";
-import { chatGPTSignInPath, getChatGPTUser } from "../../../chatgpt-auth";
+import { signInPath, getUser } from "../../../auth";
 import { completeSellerOnboarding } from "../../../../lib/seller-onboarding";
 import { PayPalSandbox } from "../../../../lib/paypal-assurance";
 
@@ -11,9 +11,9 @@ const cfg = env as Cloudflare.Env & {
 };
 
 export async function GET(request: Request) {
-  const user = await getChatGPTUser();
+  const user = await getUser();
   const url = new URL(request.url);
-  if (!user) return Response.redirect(new URL(chatGPTSignInPath(url.pathname + url.search),url),302);
+  if (!user) return Response.redirect(new URL(signInPath(url.pathname + url.search),url),302);
   if (!env.DB || !cfg.PAYPAL_CLIENT_ID || !cfg.PAYPAL_CLIENT_SECRET ||
       !cfg.PAYPAL_PARTNER_MERCHANT_ID || !cfg.PAYPAL_PARTNER_BN_CODE)
     return Response.json({ error: "Seller onboarding is not configured" },{ status: 503 });

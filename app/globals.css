@@ -345,3 +345,20 @@ h1{font-size:32px;font-weight:700;letter-spacing:-.6px;line-height:1.2}
 .form-card,.panel,.stat,.agreement-list,.stepper,.timeline{box-shadow:0 0 0 1px var(--line)}
 .stat:hover{transform:none;box-shadow:0 0 0 1px var(--line)}
 .sandbox-tag{background:#fff8e6;border-color:#f3e1ad}
+
+/* ── sign-in page ── */
+.signin{min-height:100vh;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:28px;padding:40px 20px;background:var(--bg)}
+.signin-brand{display:inline-flex;align-items:center;gap:9px;color:var(--ink);text-decoration:none;font-family:"Noto Serif Display",serif;font-stretch:62.5%;font-size:34px;line-height:1}
+.signin-card{width:100%;max-width:420px;background:#fff;border-radius:20px;padding:36px 32px;box-shadow:0 0 0 1px var(--line),0 24px 48px -32px rgba(11,31,58,.35)}
+.signin-card h1{font-size:24px;margin:0 0 8px}
+.signin-sub{margin:0 0 24px;font-size:14px;line-height:1.6;color:var(--ink-2)}
+.signin-options{display:flex;flex-direction:column;gap:10px}
+.signin-btn{display:flex;align-items:center;justify-content:center;gap:10px;height:48px;border-radius:12px;background:#fff;box-shadow:inset 0 0 0 1px #d9e1ec;color:var(--ink);font-weight:600;font-size:15px;text-decoration:none;transition:background .2s,box-shadow .2s}
+.signin-btn:hover{background:var(--wash-2);box-shadow:inset 0 0 0 1px #c5d3e8}
+.signin-btn:focus-visible{outline:2px solid var(--sky);outline-offset:2px}
+.signin-dev{background:var(--wash);color:var(--sky);box-shadow:none}
+.signin-error{margin:0 0 16px;padding:11px 14px;border-radius:10px;background:var(--bad-bg);color:var(--bad);font-size:13.5px;line-height:1.5}
+.signin-note{margin:22px 0 0;font-size:12.5px;line-height:1.6;color:var(--ink-3);text-align:center}
+.signout-form{margin:0}
+.signout-btn{border:0;background:none;padding:0;margin-top:3px;font-size:11px;color:var(--ink-3);cursor:pointer}
+.signout-btn:hover{color:var(--sky);text-decoration:underline}
