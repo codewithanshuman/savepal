@@ -217,3 +217,11 @@ html{scroll-behavior:smooth}
   .lp-footer-copy{flex-direction:column}
 }
 @media (max-width:620px){.lp-pp-grid{grid-template-columns:1fr}}
+
+/* hero: give the call to action room below the headline's descenders */
+.lp-hero-copy{top:11.5%}
+.lp-cta{margin-top:60px;height:54px;padding:6px 7px 6px 26px;font-size:16.5px;box-shadow:0 14px 30px -14px rgba(120,80,0,.55),inset 0 1px 0 rgba(255,255,255,.5)}
+.lp-cta span{width:42px;height:42px}
+@media (max-height:820px) and (min-width:861px){.lp-hero-copy{top:9%}.lp-cta{margin-top:44px}}
+@media (max-width:860px){.lp-cta{margin-top:40px}}
+.lp-head h2{margin-bottom:16px}

@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { cookie, readCookie, safeReturnPath, signSession, signState, verifySession, verifyState } from "../lib/session.ts";
-import { authorizeUrl, callbackUrl, completeSignIn } from "../lib/oauth.ts";
+import { authorizeUrl, callbackUrl, completeSignIn, safeAvatar } from "../lib/oauth.ts";
 
 const secret = "s".repeat(40);
 const user = { uid: "github:42", email: "dev@example.org", name: "Dev", provider: "github" };
@@ -58,10 +58,10 @@ const respond = map => async (url, init) => {
 };
 
 test("GitHub sign-in requires a verified primary email", async () => {
-  const base = { "https://github.com/login/oauth/access_token": { access_token: "tok" }, "https://api.github.com/user": { id: 7, login: "octo", name: null } };
+  const base = { "https://github.com/login/oauth/access_token": { access_token: "tok" }, "https://api.github.com/user": { id: 7, login: "octo", name: null, avatar_url: "https://avatars.githubusercontent.com/u/7?v=4" } };
   const ok = await completeSignIn("github", { clientId: "i", clientSecret: "s" }, "code", "cb",
     respond({ ...base, "https://api.github.com/user/emails": [{ email: "x@y.org", primary: false, verified: true }, { email: "Octo@Example.org", primary: true, verified: true }] }));
-  assert.deepEqual(ok, { uid: "github:7", email: "octo@example.org", name: "octo", provider: "github" });
+  assert.deepEqual(ok, { uid: "github:7", email: "octo@example.org", name: "octo", provider: "github", avatar: "https://avatars.githubusercontent.com/u/7?v=4" });
   await assert.rejects(() => completeSignIn("github", { clientId: "i", clientSecret: "s" }, "code", "cb",
     respond({ ...base, "https://api.github.com/user/emails": [{ email: "o@e.org", primary: true, verified: false }] })), /verified/);
 });
@@ -75,4 +75,11 @@ test("Google sign-in requires email_verified", async () => {
   await assert.rejects(() => completeSignIn("google", { clientId: "i", clientSecret: "s" }, "code", "cb",
     respond({ ...token, "https://openidconnect.googleapis.com/v1/userinfo": { sub: "99", email: "a@b.org", email_verified: false } })), /verified/);
   await assert.rejects(() => completeSignIn("google", { clientId: "i", clientSecret: "s" }, "", "cb", respond({})), /code/);
+});
+
+test("profile pictures are accepted only from the providers' HTTPS image hosts", () => {
+  assert.equal(safeAvatar("https://avatars.githubusercontent.com/u/42?v=4"), "https://avatars.githubusercontent.com/u/42?v=4");
+  assert.equal(safeAvatar("https://lh3.googleusercontent.com/a/abc=s96-c"), "https://lh3.googleusercontent.com/a/abc=s96-c");
+  for (const bad of ["http://avatars.githubusercontent.com/u/1", "https://evil.example/x.png", "https://googleusercontent.com.evil.example/a", "javascript:alert(1)", 42, null, "x".repeat(700)])
+    assert.equal(safeAvatar(bad), null, String(bad).slice(0, 40));
 });

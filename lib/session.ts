@@ -9,7 +9,7 @@ export const STATE_COOKIE = "sp_oauth";
 export const SESSION_TTL_SECONDS = 7 * 24 * 60 * 60;
 export const STATE_TTL_SECONDS = 10 * 60;
 
-export type SessionUser = { uid: string; email: string; name: string | null; provider: "github" | "google" };
+export type SessionUser = { uid: string; email: string; name: string | null; provider: "github" | "google"; avatar?: string | null };
 export type OAuthState = { state: string; provider: "github" | "google"; returnTo: string };
 type Signed<T> = T & { kind: string; exp: number };
 

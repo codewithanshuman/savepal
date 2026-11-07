@@ -30,6 +30,16 @@ export function authorizeUrl(provider: Provider, config: ProviderConfig, redirec
   return url.toString();
 }
 
+/** Profile pictures only from the providers' own image hosts, over HTTPS. */
+export function safeAvatar(value: unknown): string | null {
+  if (typeof value !== "string" || value.length > 600) return null;
+  try {
+    const url = new URL(value);
+    const ok = url.protocol === "https:" && (url.hostname === "avatars.githubusercontent.com" || url.hostname.endsWith(".googleusercontent.com"));
+    return ok ? url.toString() : null;
+  } catch { return null; }
+}
+
 async function json<T>(response: Response, what: string): Promise<T> {
   if (!response.ok) throw new Error(`${what} failed (HTTP ${response.status})`);
   return await response.json() as T;
@@ -50,19 +60,19 @@ export async function completeSignIn(
       await fetcher("https://github.com/login/oauth/access_token", { method: "POST", headers, body: form }), "GitHub token exchange");
     if (!token.access_token) throw new Error(`GitHub sign-in was not completed${token.error ? ` (${token.error})` : ""}`);
     const auth = { ...headers, Authorization: `Bearer ${token.access_token}` };
-    const user = await json<{ id: number; login: string; name: string | null }>(await fetcher("https://api.github.com/user", { headers: auth }), "GitHub profile");
+    const user = await json<{ id: number; login: string; name: string | null; avatar_url?: string }>(await fetcher("https://api.github.com/user", { headers: auth }), "GitHub profile");
     const emails = await json<Array<{ email: string; primary: boolean; verified: boolean }>>(await fetcher("https://api.github.com/user/emails", { headers: auth }), "GitHub email lookup");
     const email = emails.find(e => e.primary && e.verified)?.email;
     if (!email) throw new Error("Your GitHub account needs a verified primary email");
     if (!Number.isSafeInteger(user.id)) throw new Error("GitHub returned an invalid account");
-    return { uid: `github:${user.id}`, email: email.toLowerCase(), name: user.name || user.login, provider };
+    return { uid: `github:${user.id}`, email: email.toLowerCase(), name: user.name || user.login, provider, avatar: safeAvatar(user.avatar_url) };
   }
   form.set("grant_type", "authorization_code");
   const token = await json<{ access_token?: string }>(
     await fetcher("https://oauth2.googleapis.com/token", { method: "POST", headers, body: form }), "Google token exchange");
   if (!token.access_token) throw new Error("Google sign-in was not completed");
-  const info = await json<{ sub: string; email?: string; email_verified?: boolean; name?: string }>(
+  const info = await json<{ sub: string; email?: string; email_verified?: boolean; name?: string; picture?: string }>(
     await fetcher("https://openidconnect.googleapis.com/v1/userinfo", { headers: { ...headers, Authorization: `Bearer ${token.access_token}` } }), "Google profile");
   if (!info.sub || !info.email || info.email_verified !== true) throw new Error("Your Google account needs a verified email");
-  return { uid: `google:${info.sub}`, email: info.email.toLowerCase(), name: info.name || null, provider };
+  return { uid: `google:${info.sub}`, email: info.email.toLowerCase(), name: info.name || null, provider, avatar: safeAvatar(info.picture) };
 }

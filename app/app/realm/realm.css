@@ -100,3 +100,86 @@
 .hud-log.closed .hud-bar{margin-bottom:0}
 .hud-banners{transition:right .2s}
 @media (max-width:900px){.hud-zoom{bottom:auto;top:150px;left:auto;right:12px}}
+
+/* ── the court: real actions inside the world ── */
+.realm-stage.pointing{cursor:pointer}
+.realm-labels{pointer-events:none}
+.realm-chip.land{pointer-events:auto;cursor:pointer;font-family:"Space Mono",monospace}
+.realm-chip.land:hover{background:#ffc439}
+.realm-chip.quest{animation:r-quest 1.2s steps(2) infinite}
+@keyframes r-quest{50%{box-shadow:0 0 0 3px #ffc439,2px 2px 0 rgba(27,35,51,.35)}}
+button.hud{font:inherit;color:inherit;text-align:left;cursor:pointer}
+.hud-treasury:hover{border-color:rgba(224,164,0,.6)}
+.hud-treasury.quest{box-shadow:0 0 0 2px #ffc439,0 14px 34px -14px rgba(0,0,0,.6)}
+.hud-pp{height:14px;width:auto;filter:brightness(0) invert(1);opacity:.85}
+.hud-kingdom{display:flex;align-items:center;gap:10px;width:100%;padding:0;border:0;background:none;color:inherit;cursor:pointer;text-align:left}
+.hud-kingdom h1{flex:1}
+.hud-kingdom b{font-size:12px;color:#e0a400}
+.hud-atlas{list-style:none;margin:0 0 10px;padding:0;display:flex;flex-direction:column;gap:4px;max-height:220px;overflow:auto}
+.hud-atlas a{display:flex;align-items:center;gap:8px;padding:7px 9px;border:1px solid rgba(255,255,255,.1);color:#d7deea;text-decoration:none;font-size:12px}
+.hud-atlas a:hover{border-color:#e0a400;color:#fff}
+.hud-atlas span{flex:1;min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.hud-atlas small{color:#8e9bb0}
+.hud-atlas em{font:400 10px "Silkscreen",monospace;font-style:normal;background:#ffc439;color:#141b28;padding:0 5px}
+.hud-quest{left:50%;top:18px;translate:-50% 0;display:flex;align-items:center;gap:12px;padding:9px 14px;max-width:min(440px,calc(100vw - 24px));border-color:rgba(255,196,57,.5)!important}
+.hud-quest b{width:24px;height:24px;flex:none;display:grid;place-items:center;background:#ffc439;color:#141b28;font:400 14px "Silkscreen",monospace;animation:r-bob .9s ease-in-out infinite}
+@keyframes r-bob{50%{transform:translateY(-2px)}}
+.hud-quest span{font-size:12.5px;color:#fff;font-weight:700}
+.hud-quest em{margin-left:auto;font:400 10px "Silkscreen",monospace;font-style:normal;letter-spacing:1.5px;color:#ffd15c}
+.hud-court{left:50%;top:50%;translate:-50% -50%;width:min(400px,calc(100vw - 24px));max-height:calc(100dvh - 40px);overflow:auto;display:flex;flex-direction:column;gap:10px;z-index:6;animation:r-court .25s steps(5) both}
+@keyframes r-court{from{opacity:0;translate:-50% -46%}}
+.court-lore{margin:0;font-size:12px;line-height:1.6;color:#aab5c7}
+.court-gold{display:flex;align-items:center;justify-content:space-between;gap:10px;padding:10px 12px;border:1px solid rgba(255,209,92,.25);background:rgba(255,209,92,.06)}
+.court-gold strong{font:400 26px "Silkscreen",monospace;color:#ffd15c}
+.court-gold span{font:400 9.5px "Silkscreen",monospace;letter-spacing:1.5px;padding:3px 7px;border:1px solid rgba(255,255,255,.2);color:#cfd8e6}
+.court-gold span.held{color:#ffd15c;border-color:rgba(255,209,92,.6)}.court-gold span.paid{color:#6fe3a4;border-color:rgba(111,227,164,.6)}
+.court-btn{height:42px;border:0;font:400 12px "Silkscreen",monospace;letter-spacing:1.5px;cursor:pointer;transition:transform .1s}
+.court-btn.gold{background:#e0a400;color:#141b28;box-shadow:inset 0 -3px 0 rgba(0,0,0,.25),3px 3px 0 rgba(0,0,0,.35)}
+.court-btn.gold:hover:not(:disabled){background:#f2b52e}
+.court-btn.gold:active:not(:disabled){transform:translate(2px,2px)}
+.court-btn.ghost{background:none;color:#cfd8e6;border:1px solid rgba(255,255,255,.2)}
+.court-btn.ghost:hover:not(:disabled){border-color:#e0a400;color:#ffd15c}
+.court-btn:disabled{opacity:.5;cursor:not-allowed}
+.court-pp{background:#fff;padding:10px 10px 2px;border-radius:2px}
+.court-note{margin:0;font-size:12px;line-height:1.55;color:#cfd8e6;padding:9px 10px;border-left:2px solid rgba(255,255,255,.2);background:rgba(255,255,255,.03)}
+.court-ledger{list-style:none;margin:4px 0 0;padding:8px 0 0;border-top:2px dotted rgba(255,255,255,.14);display:flex;flex-direction:column;gap:5px}
+.court-ledger li{display:flex;justify-content:space-between;gap:10px;font-size:11.5px;color:#d7deea}
+.court-ledger time{color:#8e9bb0;white-space:nowrap}
+.court-ids{margin:0;font:400 9px "Silkscreen",monospace;letter-spacing:1px;color:#8e9bb0;overflow-wrap:anywhere}
+.court-gate{display:flex;align-items:center;gap:10px;padding:8px 10px;border:1px solid rgba(255,255,255,.14)}
+.court-gate b{font:400 18px "Silkscreen",monospace}
+.court-gate span{font-size:12px}
+.court-gate.g-clear{border-color:#3ccf7a;color:#6fe3a4}.court-gate.g-confirm{border-color:#e0a400;color:#ffd15c}.court-gate.g-override{border-color:#e05252;color:#ff8a80}
+.court-input{width:100%;box-sizing:border-box;background:rgba(255,255,255,.05);border:1px solid rgba(255,255,255,.16);color:#fff;font:400 13px "Space Mono",monospace;padding:9px 10px;outline:0;resize:vertical}
+.court-input:focus{border-color:#e0a400}
+.court-form{display:flex;flex-direction:column;gap:8px}
+.court-check{display:flex;gap:8px;font-size:11.5px;color:#ff8a80;align-items:flex-start}
+.court-seal{margin:0;font:400 10px "Silkscreen",monospace;letter-spacing:1.5px;color:#8e9bb0}
+.court-seal code{display:block;margin-top:4px;font:700 12px "Space Mono",monospace;color:#ffd15c;letter-spacing:1px}
+.hud-toast{left:50%;bottom:88px;translate:-50% 0;display:flex;align-items:center;gap:12px;padding:10px 14px;max-width:min(520px,calc(100vw - 24px));font-size:12.5px;color:#fff;z-index:7;border-color:rgba(60,207,122,.5)}
+.hud-toast.err{border-color:rgba(224,82,82,.6);color:#ffb3ad}
+.hud-toast button{border:0;background:none;color:inherit;cursor:pointer}
+
+@media (max-width:900px){
+  .hud-title{width:auto;right:12px;padding:10px 12px 12px}
+  .hud-title p{display:none}
+  .hud-title h1{font-size:15px;margin:0 0 6px}
+  .hud-treasury{top:112px;bottom:auto;left:12px;right:auto;width:auto;padding:8px 12px 10px}
+  .hud-treasury .hud-bar{margin-bottom:4px}
+  .hud-treasury strong{font-size:20px;margin-bottom:4px}
+  .hud-treasury .hud-meter{display:none}
+  .hud-zoom{top:112px;bottom:auto;right:12px;left:auto;flex-direction:column}
+  .hud-zoom button{width:38px;height:34px}
+  .hud-log{top:auto;bottom:66px;left:12px;right:12px;width:auto;height:46vh;z-index:5}
+  .hud-log.closed{top:112px;bottom:auto;left:auto;right:66px;height:auto;width:auto;padding:6px}
+  .hud-log.closed .hud-bar>span,.hud-log.closed .hud-bar>i,.hud-log.closed .hud-bar>em{display:none}
+  .hud-banners{left:12px;right:12px!important;bottom:12px;padding:8px}
+  .hud-quest{top:auto;bottom:66px;left:12px;right:12px;translate:none;max-width:none}
+  .hud-court{top:auto;bottom:0;translate:-50% 0;width:100vw;max-height:78dvh;border-left:0;border-right:0;animation:r-sheet .25s ease both}
+  @keyframes r-sheet{from{transform:translateY(30px);opacity:0}}
+  .hud-toast{bottom:auto;top:112px}
+  .hud-inspect{top:auto;bottom:66px;left:12px;width:calc(100vw - 24px)}
+  .realm-chip{font-size:8.5px;padding:1px 5px}
+  .realm-labels.small .realm-chip:not(.land){display:none}
+}
+.hud-court{background:#0e1624}

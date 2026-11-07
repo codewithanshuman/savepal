@@ -17,7 +17,39 @@ export type SceneState = {
   held: boolean; approved: boolean; paid: boolean;
   cartU: number; cartMoving: boolean; inspectors: Walker[]; showCrew: boolean;
   chestsSince: number; sealSince: number; paidSince: number;
+  /** The landmark where the viewer's next real action waits; it gets a bouncing quest marker. */
+  quest?: Landmark | null; hover?: Landmark | null;
 };
+export type Landmark = "castle" | "treasury" | "guild";
+/** Footprint and height of each landmark, for clicks, hover glow and the quest marker. */
+const LANDMARKS: Record<Landmark, { u0: number; v0: number; u1: number; v1: number; top: number }> = {
+  castle: { u0: 1.6, v0: 4.4, u1: 5.4, v1: 7.6, top: 92 },
+  treasury: { u0: 6.8, v0: 4.4, u1: 10.8, v1: 8.4, top: 128 },
+  guild: { u0: 12, v0: 5, u1: 15, v1: 7.6, top: 70 },
+};
+export function landmarkBounds(l: Landmark) {
+  const b = LANDMARKS[l];
+  const left = project(b.u0, b.v1), right = project(b.u1, b.v0), bottom = project(b.u1, b.v1), top = project((b.u0 + b.u1) / 2, (b.v0 + b.v1) / 2, b.top);
+  return { x0: left.x, x1: right.x, y0: top.y, y1: bottom.y, cx: (left.x + right.x) / 2, top: top.y };
+}
+export function landmarkAt(x: number, y: number): Landmark | null {
+  for (const l of ["treasury", "guild", "castle"] as Landmark[]) { const b = landmarkBounds(l); if (x >= b.x0 && x <= b.x1 && y >= b.y0 && y <= b.y1) return l; }
+  return null;
+}
+/** A pixel banner with "!" bobbing above the landmark that needs the viewer. */
+function questMarker(ctx: CanvasRenderingContext2D, l: Landmark, t: number) {
+  const b = landmarkBounds(l), bob = Math.round(Math.sin(t / 260) * 2.5);
+  const x = Math.round(b.cx), y = Math.round(b.top) - 14 + bob;
+  ctx.fillStyle = "rgba(255,196,57,.28)"; ctx.beginPath(); ctx.ellipse(x, y + 4, 12 + Math.sin(t / 260), 12 + Math.sin(t / 260), 0, 0, Math.PI * 2); ctx.fill();
+  ctx.fillStyle = "#1b2333"; ctx.fillRect(x - 6, y - 8, 12, 15); ctx.fillRect(x - 2, y + 7, 4, 3);
+  ctx.fillStyle = "#ffc439"; ctx.fillRect(x - 5, y - 7, 10, 13); ctx.fillRect(x - 1, y + 6, 2, 3);
+  ctx.fillStyle = "#1b2333"; ctx.fillRect(x - 1, y - 5, 2, 6); ctx.fillRect(x - 1, y + 2, 2, 2);
+}
+function hoverGlow(ctx: CanvasRenderingContext2D, l: Landmark) {
+  const b = LANDMARKS[l], pts = [project(b.u0 - .15, b.v0 - .15), project(b.u1 + .15, b.v0 - .15), project(b.u1 + .15, b.v1 + .15), project(b.u0 - .15, b.v1 + .15)];
+  ctx.strokeStyle = "rgba(255,209,92,.9)"; ctx.lineWidth = 1; ctx.setLineDash([3, 2]);
+  ctx.beginPath(); pts.forEach((p, i) => i ? ctx.lineTo(p.x + .5, p.y + .5) : ctx.moveTo(p.x + .5, p.y + .5)); ctx.closePath(); ctx.stroke(); ctx.setLineDash([]);
+}
 
 /* ── terrain (static, rendered once and cached) ── */
 const isRoad = (u: number, v: number) =>
@@ -328,6 +360,7 @@ export function drawScene(ctx: CanvasRenderingContext2D, s: SceneState, t: numbe
   foam(ctx, t);
   // contact shadows first, so no shadow paints over a neighbour
   contactShadow(ctx, 1.6, 4.4, 5.4, 7.6); contactShadow(ctx, 6.8, 4.4, 10.8, 8.4); contactShadow(ctx, 12, 5, 15, 7.6);
+  if (s.hover) hoverGlow(ctx, s.hover);
   s.houses.forEach(h => contactShadow(ctx, h.u, h.v, h.u + h.s, h.v + h.s));
   const frame = (moving: boolean) => (moving ? Math.floor(t / 170) % 2 : 0) as 0 | 1;
   const items: Drawable[] = [
@@ -371,6 +404,7 @@ export function drawScene(ctx: CanvasRenderingContext2D, s: SceneState, t: numbe
     sprite(ctx, person("inspector", w.tunic, frame(w.moving)), p.x, p.y, w.flip);
   } }));
   items.sort((a, b) => a.depth - b.depth).forEach(i => i.draw());
+  if (s.quest) questMarker(ctx, s.quest, t);
 }
 
 /** Screen-space box for a house, in native pixels, for clicks and labels. */

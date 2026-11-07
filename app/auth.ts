@@ -4,7 +4,7 @@ import { redirect } from "next/navigation";
 import { PROVIDERS, type Provider, type ProviderConfig } from "../lib/oauth";
 import { SESSION_COOKIE, readCookie, safeReturnPath, verifySession } from "../lib/session";
 
-export type AppUser = { userId: string; displayName: string; email: string; fullName: string | null };
+export type AppUser = { userId: string; displayName: string; email: string; fullName: string | null; avatar: string | null };
 
 type AuthEnv = {
   SESSION_SECRET?: string; SITE_ORIGIN?: string;
@@ -47,7 +47,7 @@ export async function getUser(): Promise<AppUser | null> {
   const secret = sessionSecret();
   if (secret) {
     const session = await verifySession(readCookie(requestHeaders.get("cookie"), SESSION_COOKIE), secret);
-    if (session) return { userId: session.uid, email: session.email, displayName: session.name || session.email, fullName: session.name };
+    if (session) return { userId: session.uid, email: session.email, displayName: session.name || session.email, fullName: session.name, avatar: session.avatar ?? null };
   }
   if (DEV_MOCK) {
     const userId = requestHeaders.get(DEV_HEADERS.id), email = requestHeaders.get(DEV_HEADERS.email);
@@ -55,7 +55,7 @@ export async function getUser(): Promise<AppUser | null> {
       const raw = requestHeaders.get(DEV_HEADERS.name);
       let fullName: string | null = null;
       if (raw && requestHeaders.get(DEV_HEADERS.encoding) === "percent-encoded-utf-8") { try { fullName = decodeURIComponent(raw); } catch { fullName = null; } }
-      return { userId, email, displayName: fullName ?? email, fullName };
+      return { userId, email, displayName: fullName ?? email, fullName, avatar: null };
     }
   }
   return null;
