@@ -128,8 +128,8 @@ export default function Realm({ id }: { id: string }) {
   /* ── animation state lives outside React so walking is smooth ── */
   const world = useRef<SceneState & { cartTarget: number; crewTargets: Array<{ u: number; v: number }> }>({
     houses: [], verdicts: {}, visited: new Set(), active: null, held: false, approved: false, paid: false,
-    cartU: 3.6, cartMoving: false, showCrew: false, chestsSince: 0, sealSince: 0, cartTarget: 3.6, crewTargets: [],
-    inspectors: CREW_HUES.map((tunic, i) => ({ u: 7.6 + i * .5, v: 12.5, moving: false, flip: false, tunic } as Walker)),
+    cartU: 3.6, cartMoving: false, showCrew: false, chestsSince: 0, sealSince: 0, paidSince: 0, cartTarget: 3.6, crewTargets: [],
+    inspectors: CREW_HUES.map((tunic, i) => ({ u: 6.9 + i * .45, v: 12.5, moving: false, flip: false, tunic } as Walker)),
   });
   useEffect(() => {
     if (!project) return;
@@ -139,12 +139,13 @@ export default function Realm({ id }: { id: string }) {
     const approved = project.status === "APPROVED" || paid;
     if (held && !w.held) w.chestsSince = now;
     if (approved && !w.approved) w.sealSince = now;
+    if (paid && !w.paid) w.paidSince = now;
     Object.assign(w, { houses, verdicts, visited, active, held, approved, paid, showCrew: running || visited.size > 0 });
     w.cartTarget = paid ? 13.4 : held ? 8.9 : 3.6;
     const target = active ? houses.find(h => h.path === active) : null;
     w.crewTargets = w.inspectors.map((_, i) => target
       ? { u: target.u + target.s / 2 + (i - 1) * .32, v: target.v < 12 ? target.v + target.s + .45 + (i % 2) * .12 : target.v - .45 - (i % 2) * .12 }
-      : { u: 7.7 + i * .45, v: 12.55 + (i % 2) * .1 });
+      : { u: 6.9 + i * .45, v: 12.55 + (i % 2) * .1 });
   }, [project, houses, verdicts, visited, active, running]);
 
   useEffect(() => {
@@ -175,7 +176,7 @@ export default function Realm({ id }: { id: string }) {
         if (m.moving) { const k = Math.min(1, speed / dist); m.u += du * k; m.v += dv * k; m.flip = du - dv < 0; }
       });
       ctx.imageSmoothingEnabled = false;
-      drawScene(ctx, w, now, { king: project.client_email, artisan: project.freelancer_email });
+      drawScene(ctx, w, now);
       frame = requestAnimationFrame(step);
     };
     frame = requestAnimationFrame(step);
@@ -188,7 +189,7 @@ export default function Realm({ id }: { id: string }) {
       const el = stage.current; if (!el) return;
       // Fit the island to the space left of the log panel on wide screens.
       const wide = el.clientWidth > 900, freeW = el.clientWidth - (wide ? 340 : 0), freeH = el.clientHeight - (wide ? 110 : 260);
-      const k = Math.max(1, Math.floor(Math.min(freeW / NATIVE_W, freeH / NATIVE_H) * 4) / 4);
+      const k = Math.max(1, Math.floor(Math.min(freeW / NATIVE_W, freeH / NATIVE_H) * 10) / 10);
       setCam(c => c.k ? c : { k, x: wide ? -160 : 0, y: wide ? -10 : -110 });
     };
     fit(); window.addEventListener("resize", fit);
@@ -231,6 +232,7 @@ export default function Realm({ id }: { id: string }) {
           <span className="realm-chip gold" style={tre}>TREASURY{days !== null ? ` · ${days}D HELD` : ""}</span>
           <span className="realm-chip" style={toScreen(project3(3.5, 8.4).x, project3(3.5, 8.4).y)}>CLIENT</span>
           <span className="realm-chip" style={toScreen(project3(13.6, 8.4).x, project3(13.6, 8.4).y)}>FREELANCER</span>
+          <span className="realm-chip" style={toScreen(project3(19.6, 16.2).x, project3(19.6, 16.2).y + 8)}>HARBOUR</span>
         </div>
       </div>
     </div>
@@ -277,4 +279,4 @@ export default function Realm({ id }: { id: string }) {
 }
 
 function project3(u: number, v: number) { return project(u, v); }
-function projectTreasuryLabel() { return project(8.8, 8.7); }
+function projectTreasuryLabel() { return project(8.8, 6.35, 122); }

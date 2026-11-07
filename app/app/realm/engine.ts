@@ -10,8 +10,8 @@
 
 export const HW = 16, HH = 8;
 export const GRID = 18;
-export const NATIVE_W = 620, NATIVE_H = 420;
-export const OX = NATIVE_W / 2, OY = 70;
+export const NATIVE_W = 780, NATIVE_H = 520;
+export const OX = NATIVE_W / 2 - 18, OY = 88;
 
 export type P = { x: number; y: number };
 export const project = (u: number, v: number, z = 0): P => ({ x: OX + (u - v) * HW, y: OY + (u + v) * HH - z });
