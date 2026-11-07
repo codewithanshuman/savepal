@@ -1,7 +1,7 @@
 "use client";
 
 import Link from "next/link";
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Activity, ArrowRight, Check, CheckCircle2, CircleDollarSign, ClipboardCheck, Clock3, ExternalLink, FileCheck2, FileText, Fingerprint, GitCompareArrows, LayoutDashboard, Link2, LockKeyhole, Menu, Plus, RefreshCw, ShieldAlert, ShieldCheck, Sparkles, TrendingDown, TrendingUp, X, XCircle } from "lucide-react";
 
 type Kind = "reachable" | "contains" | "absent" | "title" | "link" | "path" | "no_broken_pages" | "manual";
@@ -59,6 +59,141 @@ async function api(payload: Record<string, unknown>) {
 
 const PAID = ["COMPLETED", "PARTIALLY_REFUNDED", "REFUNDED"];
 
+const reducedMotion = () => typeof window !== "undefined" && !!window.matchMedia?.("(prefers-reduced-motion: reduce)").matches;
+
+/* ── The PayPal Vault: where the money physically is, driven by real states and audit events ── */
+type Spot = "client" | "vault" | "freelancer";
+const SPOTS: Record<Spot, { x: number; y: number }> = { client: { x: 120, y: 92 }, vault: { x: 380, y: 52 }, freelancer: { x: 640, y: 92 } };
+const ROUTES: Record<string, string> = {
+  "client>vault": "M120 92 Q 250 0 380 52", "vault>freelancer": "M380 52 Q 510 0 640 92",
+  "vault>client": "M380 52 Q 250 0 120 92", "client>freelancer": "M120 92 Q 380 -60 640 92",
+};
+const HOLD_DAYS = 29;
+
+function spotFor(fundingStatus: string, paymentStatus: string): Spot {
+  if (fundingStatus === "CAPTURED" || PAID.includes(paymentStatus)) return "freelancer";
+  if (fundingStatus === "HELD" || fundingStatus === "PENDING" || fundingStatus === "VOIDING") return "vault";
+  return "client";
+}
+
+/** Money events from the audit log, oldest first, each with where the money was afterwards. */
+type MoneyMoment = { at: string; label: string; spot: Spot; approved: boolean };
+function moneyMoments(audit: Event[]): MoneyMoment[] {
+  const labels: Record<string, string> = {
+    AGREEMENT_CREATED: "Agreement created", AGREEMENT_ACCEPTED: "Freelancer accepted", PAYPAL_HOLD_ORDER_CREATED: "PayPal checkout opened",
+    FUNDS_PENDING: "PayPal reviewing hold", FUNDS_HELD: "Funds held by PayPal", CLIENT_APPROVED: "Work approved",
+    FUNDS_RELEASED: "Released to freelancer", FUNDS_RETURNED: "Hold cancelled", FUNDS_STATUS_CHANGED: "PayPal updated the hold",
+  };
+  let spot: Spot = "client", approved = false;
+  return [...audit].reverse().filter(e => labels[e.type]).map(e => {
+    if (e.type === "FUNDS_HELD" || e.type === "FUNDS_PENDING") spot = "vault";
+    if (e.type === "FUNDS_RELEASED") spot = "freelancer";
+    if (e.type === "FUNDS_RETURNED") spot = "client";
+    if (e.type === "FUNDS_STATUS_CHANGED") spot = /CAPTURED/.test(e.detail) ? "freelancer" : /VOIDED|EXPIRED|FAILED/.test(e.detail) ? "client" : spot;
+    if (e.type === "CLIENT_APPROVED") approved = true;
+    return { at: e.created_at, label: labels[e.type], spot, approved };
+  });
+}
+
+function Wallet({ x, name, initials, active, tone }: { x: number; name: string; initials: string; active: boolean; tone: "client" | "freelancer" }) {
+  return <g className={`vs-wallet ${active ? "on" : ""}`} transform={`translate(${x - 62} 112)`}>
+    <rect width="124" height="78" rx="16" className="vs-wallet-body" />
+    <path d="M0 30 H124" className="vs-wallet-line" />
+    <rect x="78" y="40" width="34" height="22" rx="7" className="vs-wallet-clasp" />
+    <circle cx="22" cy="18" r="11" className={`vs-ava ${tone}`} />
+    <text x="22" y="22" className="vs-ava-t">{initials}</text>
+    <text x="62" y="104" className="vs-label">{name}</text>
+  </g>;
+}
+
+function VaultScene({ project, audit }: { project: Project; audit: Event[] }) {
+  const moments = useMemo(() => moneyMoments(audit), [audit]);
+  const [viewing, setViewing] = useState<number | null>(null);
+  const live = viewing === null;
+  const liveSpot = spotFor(project.funding.status, project.payment_status);
+  const target: Spot = live ? liveSpot : moments[viewing]?.spot ?? liveSpot;
+  const coins = useRef<SVGGElement>(null);
+  const shown = useRef<Spot>(target);
+  const paths = useRef<Record<string, SVGPathElement | null>>({});
+  const [moving, setMoving] = useState(false);
+
+  useEffect(() => {
+    const from = shown.current, to = target, el = coins.current;
+    const place = (x: number, y: number) => el?.setAttribute("transform", `translate(${x} ${y})`);
+    if (from === to || reducedMotion()) { place(SPOTS[to].x, SPOTS[to].y); shown.current = to; return; }
+    // Use the route in its own direction, or the opposite route played backwards.
+    const forward = paths.current[`${from}>${to}`], backward = paths.current[`${to}>${from}`];
+    const path = forward ?? backward, reverse = !forward;
+    if (!path) { place(SPOTS[to].x, SPOTS[to].y); shown.current = to; return; }
+    const length = path.getTotalLength(), start = performance.now(), duration = 1300;
+    let frame = 0;
+    setMoving(true);
+    const tick = (now: number) => {
+      const t = Math.min(1, (now - start) / duration), e = 1 - Math.pow(1 - t, 3);
+      const p = path.getPointAtLength((reverse ? 1 - e : e) * length);
+      place(p.x, p.y);
+      if (t < 1) frame = requestAnimationFrame(tick); else { shown.current = to; setMoving(false); }
+    };
+    frame = requestAnimationFrame(tick);
+    return () => { cancelAnimationFrame(frame); shown.current = to; };
+  }, [target]);
+
+  const locked = target === "vault";
+  const daysLeft = project.funding.expiresAt ? Math.max(0, Math.ceil((new Date(project.funding.expiresAt).getTime() - Date.now()) / 86_400_000)) : null;
+  const ring = live && locked && daysLeft !== null ? Math.min(1, daysLeft / HOLD_DAYS) : locked ? 1 : 0;
+  const amount = money(project.amount_cents);
+  const caption = target === "vault" ? `${amount} is locked in the PayPal vault` : target === "freelancer" ? `${amount} reached the freelancer` : `${amount} is with the client`;
+  const sub = !live ? `As of ${date(moments[viewing!]?.at ?? null)}` :
+    target === "vault" ? (daysLeft !== null ? `${daysLeft} of ${HOLD_DAYS} days left on the hold · released only when the work is approved` : "Released only when the work is approved") :
+    target === "freelancer" ? "Released through PayPal after the client approved the work" :
+    project.funding.status === "VOIDED" ? "The hold was cancelled and the money returned" :
+    project.funding.status === "EXPIRED" ? "The hold expired; the client can secure it again" : "Waiting to be secured with PayPal";
+  const client = project.client_email, freelancer = project.freelancer_email;
+
+  return <section className="panel vault" aria-label="Where the money is">
+    <div className="vault-top">
+      <div><h2>Where the money is</h2><p>{live ? "Live from PayPal" : "Replaying the record"}</p></div>
+      {!live && <button className="ghost-button vault-live" onClick={() => setViewing(null)}><span className="vault-dot" /> Back to live</button>}
+      {live && <span className="vault-livebadge"><span className="vault-dot" /> Live</span>}
+    </div>
+    <svg viewBox="44 6 672 226" className={`vault-svg ${moving ? "moving" : ""}`} role="img" aria-label={`${caption}. ${sub}`}>
+      <defs>
+        <linearGradient id="vs-body" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stopColor="#123a8c" /><stop offset="1" stopColor="#0a2463" /></linearGradient>
+        <linearGradient id="vs-coin" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stopColor="#ffd766" /><stop offset="1" stopColor="#f2b21b" /></linearGradient>
+      </defs>
+      {Object.entries(ROUTES).filter(([k]) => k !== "vault>client").map(([k, d]) => <path key={k} d={d} className={`vs-track ${k === "client>freelancer" ? "direct" : ""}`} />)}
+      {Object.entries(ROUTES).map(([k, d]) => <path key={`p-${k}`} ref={el => { paths.current[k] = el; }} d={d} fill="none" stroke="none" />)}
+
+      <Wallet x={SPOTS.client.x} name="Client" initials={initials(client)} active={target === "client"} tone="client" />
+      <Wallet x={SPOTS.freelancer.x} name="Freelancer" initials={initials(freelancer)} active={target === "freelancer"} tone="freelancer" />
+
+      <g className={`vs-vault ${locked ? "locked" : "open"}`} transform="translate(305 86)">
+        <rect x="0" y="0" width="150" height="122" rx="18" fill="url(#vs-body)" />
+        <rect x="14" y="118" width="18" height="10" rx="3" className="vs-leg" /><rect x="118" y="118" width="18" height="10" rx="3" className="vs-leg" />
+        <circle cx="75" cy="61" r="47" className="vs-ring-bg" />
+        <circle cx="75" cy="61" r="47" className="vs-ring" pathLength={1} style={{ strokeDasharray: `${ring} 1` }} transform="rotate(-90 75 61)" />
+        <g className="vs-door">
+          <circle cx="75" cy="61" r="38" className="vs-door-face" />
+          <g className="vs-dial"><circle cx="75" cy="61" r="12" className="vs-dial-c" /><path d="M75 43 V52 M75 70 V79 M57 61 H66 M84 61 H93" className="vs-dial-s" /></g>
+        </g>
+        <text x="75" y="141" className="vs-label">PayPal vault</text>
+      </g>
+
+      <g ref={coins} className="vs-coins" transform={`translate(${SPOTS[target].x} ${SPOTS[target].y})`}>
+        <ellipse cx="0" cy="22" rx="22" ry="5" className="vs-coin-shadow" />
+        {[14, 7, 0].map(y => <g key={y}><ellipse cx="0" cy={y + 4} rx="20" ry="6.5" className="vs-coin-edge" /><ellipse cx="0" cy={y} rx="20" ry="6.5" fill="url(#vs-coin)" className="vs-coin-top" /></g>)}
+        <g transform="translate(0 -24)"><rect x="-38" y="-13" width="76" height="22" rx="11" className="vs-amount" /><text x="0" y="2" className="vs-amount-t">{amount}</text></g>
+      </g>
+    </svg>
+    <div className="vault-caption"><strong>{caption}</strong><span>{sub}</span></div>
+    {moments.length > 0 && <div className="vault-history" role="list" aria-label="Money history">
+      {moments.map((m, i) => <button key={`${m.at}-${i}`} role="listitem" className={`vh-point ${viewing === i ? "on" : ""} s-${m.spot}`} onClick={() => setViewing(viewing === i ? null : i)} title={`${m.label} · ${date(m.at)}`}>
+        <i /><span>{m.label}</span><small>{new Date(m.at).toLocaleDateString("en-US", { month: "short", day: "numeric" })}</small>
+      </button>)}
+    </div>}
+  </section>;
+}
+
 /** Fund first, release on proof: where the client's money is, and what each side can do next. */
 function MoneyTimeline({ project, data, busy, run, onFunded, onError }: {
   project: Project; data: WorkspaceData; busy: boolean;
@@ -68,7 +203,6 @@ function MoneyTimeline({ project, data, busy, run, onFunded, onError }: {
   const f = project.funding, st = f.status, isClient = project.role === "client";
   const released = st === "CAPTURED" || PAID.includes(project.payment_status);
   const held = st === "HELD" || st === "PENDING";
-  const stage = released ? 3 : held ? 2 : 1;
   const amount = money(project.amount_cents);
   const expiresSoon = held && f.expiresAt && new Date(f.expiresAt).getTime() - Date.now() < 3 * 86_400_000;
   const sellerMissing = data.paymentMode === "SELLER" && !project.seller_merchant_id;
@@ -85,9 +219,6 @@ function MoneyTimeline({ project, data, busy, run, onFunded, onError }: {
   return <section className="panel money">
     <div className="money-head"><img src="/paypal-logo.webp" alt="PayPal" width={2000} height={511} /><span className={`money-state s-${released ? "released" : held ? "held" : "open"}`}>{released ? "Released" : held ? "Funds held" : st === "NONE" || st === "ORDER_CREATED" ? "Not funded yet" : st.toLowerCase()}</span></div>
     <strong className="money-amount">{amount}</strong>
-    <ol className="money-steps">
-      {["Secured", "Held by PayPal", "Released"].map((label, i) => <li key={label} className={i + 1 < stage || (i + 1 === stage && (released || held)) ? "done" : i + 1 === stage ? "current" : ""}><span>{i + 1 < stage || (i + 1 === stage && (released || held)) ? <Check size={12} strokeWidth={3}/> : i + 1}</span>{label}</li>)}
-    </ol>
     <p className="money-msg">{message}</p>
     {held && f.expiresAt && <p className={`money-note ${expiresSoon ? "warn" : ""}`}>Hold valid until {date(f.expiresAt)}{expiresSoon ? ". Approve soon, or the client will need to secure it again." : ""}</p>}
     {f.canFund && sellerMissing && <div className="integration-note">The freelancer needs to connect their PayPal account before funds can be secured.</div>}
@@ -199,6 +330,14 @@ export default function Workspace() {
   }, [selected]);
   useEffect(() => { refresh().catch(e => setError(e.message)); }, [refresh]);
   const project = data?.projects.find(p => p.id === selected) || null;
+  // While money is in motion, keep the vault live: PayPal webhooks update the server, this picks them up.
+  const moneyMoving = !!project && project.funding.mode === "HOLD" && !PAID.includes(project.payment_status) &&
+    ["ORDER_CREATED", "PENDING", "HELD", "VOIDING"].includes(project.funding.status);
+  useEffect(() => {
+    if (!moneyMoving || !selected) return;
+    const timer = window.setInterval(() => { if (document.visibilityState === "visible") refresh(selected).catch(() => {}); }, 15_000);
+    return () => window.clearInterval(timer);
+  }, [moneyMoving, selected, refresh]);
   const openProject = (id: string) => { setSelected(id); setCreating(false); setTab("overview"); setError(""); setNotice(""); setOverride(false); setReason(""); setHistory([]); refresh(id).catch(e => setError(e.message)); };
   const run = async (payload: Record<string, unknown>, success: string) => {
     setBusy(true); setError(""); setNotice("");
@@ -258,7 +397,7 @@ export default function Workspace() {
         {!creating && data && !project && tab === "overview" && <div><div className="welcome"><div><h1>Welcome back{data.user.name ? `, ${data.user.name.split(/[\s@.]/)[0]}` : ""}</h1><p>Create an agreement, check the delivered work, then approve and pay. Everything stays on the record.</p><button className="primary-button" onClick={()=>setCreating(true)}><Plus size={17}/> New agreement</button></div></div><div className="stats"><div className="stat"><div className="stat-icon blue"><FileText size={19}/></div><span>Active agreements</span><strong>{totals.contracts}</strong></div><div className="stat"><div className="stat-icon amber"><Clock3 size={19}/></div><span>Needs review</span><strong>{totals.inReview}</strong></div><div className="stat"><div className="stat-icon green"><CircleDollarSign size={19}/></div><span>Sandbox paid</span><strong>{money(totals.paid)}</strong></div></div><div className="section-heading"><div><h2>Agreements</h2><p>Every milestone, from scope to settlement.</p></div><button className="ghost-button" onClick={()=>setCreating(true)}><Plus size={16}/> New agreement</button></div>{data.projects.length ? <div className="agreement-list">{data.projects.map(p=><button key={p.id} className="agreement-row" onClick={()=>openProject(p.id)}><div className="agreement-logo"><FileText size={20}/></div><div className="agreement-info"><strong>{p.title}</strong><span>{p.role === "client" ? "Client" : "Freelancer"} · {p.role === "client" ? p.freelancer_email : p.client_email}</span></div>{p.funding.mode === "HOLD" && p.funding.status === "HELD" && p.payment_status !== "COMPLETED" && <span className="held-tag">Funds held</span>}<Pill tone={p.payment_status === "COMPLETED" ? "green" : p.status === "REVIEW" ? "amber" : "blue"}>{p.payment_status === "COMPLETED" ? "Paid" : statusLabel[p.status] || p.status}</Pill><strong className="agreement-amount">{money(p.amount_cents)}</strong><ArrowRight size={17} className="row-arrow"/></button>)}</div> : <div className="empty"><div className="empty-icon"><FileCheck2 size={26}/></div><h3>Your first agreement starts here</h3><p>Create a milestone with clear acceptance criteria, then invite a freelancer to submit evidence.</p><button className="primary-button" onClick={()=>setCreating(true)}>Create an agreement <ArrowRight size={16}/></button></div>}</div>}
         {!creating && data && project && tab === "overview" && <div className="detail-view"><div className="detail-heading"><div><div className="page-eyebrow">AGREEMENT <span>·</span> {project.id.slice(0,8).toUpperCase()}</div><h1>{project.title}</h1><p>{project.description}</p><div className="detail-pills"><Pill tone={project.payment_status === "COMPLETED" ? "green" : project.status === "REVIEW" ? "amber" : "blue"}>{project.payment_status === "COMPLETED" ? "Payment completed" : statusLabel[project.status] || project.status}</Pill><Pill>{project.role === "client" ? "Client view" : "Freelancer view"}</Pill></div></div><div className="amount-card"><small>MILESTONE VALUE</small><strong>{money(project.amount_cents)}</strong><span>USD · PayPal sandbox</span></div></div>
           <div className="stepper">{steps.map((step,i)=><div key={step} className={`step ${i<currentStep?"done":i===currentStep?"current":""}`}><span className="step-circle">{i<currentStep?<Check size={14}/>:String(i+1).padStart(2,"0")}</span><span>{step}</span></div>)}</div>
-          <div className="detail-grid"><div className="detail-main"><section className="panel"><div className="panel-heading"><div className="panel-icon"><ClipboardCheck size={20}/></div><div><h2>Acceptance criteria</h2><p>Agreement version 1 · locked at creation</p></div><LockKeyhole size={16} className="muted-icon"/></div><div className="criteria-list">{project.criteria.map((c,i)=>{const f=project.findings?.[i];const quote=f?.evidenceRefs?.find(r=>r.excerpt)?.excerpt;return <div className="criteria-item" key={i}><div className={`finding-icon ${f?.status?.toLowerCase() || ""}`}>{f?.status==="VERIFIED"?<Check size={16}/>:f?.status==="FAILED"?<X size={16}/>:<span>{String(i+1).padStart(2,"0")}</span>}</div><div><strong>{c.label} <em className={`req-chip ${c.required===false?"":"on"}`}>{c.required===false?"Optional":"Required"}</em></strong><span>{f ? f.explanation : criterionHint(c)}</span>{quote && <q className="finding-quote">{quote}</q>}</div>{f && <div className="finding-tags"><Pill tone={f.status==="VERIFIED"?"green":f.status==="FAILED"?"red":"amber"}>{f.status.toLowerCase()}</Pill>{f.confidence && <span className={`confidence c-${f.confidence.toLowerCase()}`} title="How strongly the captured evidence supports this result">{f.confidence.toLowerCase()} confidence</span>}</div>}</div>})}</div></section>
+          <div className="detail-grid"><div className="detail-main">{project.funding.mode==="HOLD" && <VaultScene project={project} audit={audit}/>}<section className="panel"><div className="panel-heading"><div className="panel-icon"><ClipboardCheck size={20}/></div><div><h2>Acceptance criteria</h2><p>Agreement version 1 · locked at creation</p></div><LockKeyhole size={16} className="muted-icon"/></div><div className="criteria-list">{project.criteria.map((c,i)=>{const f=project.findings?.[i];const quote=f?.evidenceRefs?.find(r=>r.excerpt)?.excerpt;return <div className="criteria-item" key={i}><div className={`finding-icon ${f?.status?.toLowerCase() || ""}`}>{f?.status==="VERIFIED"?<Check size={16}/>:f?.status==="FAILED"?<X size={16}/>:<span>{String(i+1).padStart(2,"0")}</span>}</div><div><strong>{c.label} <em className={`req-chip ${c.required===false?"":"on"}`}>{c.required===false?"Optional":"Required"}</em></strong><span>{f ? f.explanation : criterionHint(c)}</span>{quote && <q className="finding-quote">{quote}</q>}</div>{f && <div className="finding-tags"><Pill tone={f.status==="VERIFIED"?"green":f.status==="FAILED"?"red":"amber"}>{f.status.toLowerCase()}</Pill>{f.confidence && <span className={`confidence c-${f.confidence.toLowerCase()}`} title="How strongly the captured evidence supports this result">{f.confidence.toLowerCase()} confidence</span>}</div>}</div>})}</div></section>
           <section className="panel"><div className="panel-heading"><div className="panel-icon"><Link2 size={20}/></div><div><h2>Delivery evidence</h2><p>Specific submission tied to this milestone</p></div></div>{project.evidence_url ? <div className="evidence-card"><div><small>WEBSITE URL</small><a href={project.evidence_url} target="_blank" rel="noopener noreferrer">{project.evidence_url} <ExternalLink size={14}/></a></div><p>{project.evidence_notes}</p><div className="evidence-meta">Submitted {date(project.evidence_at)} · SHA-256 {project.evidence_hash?.slice(0,16)}…</div></div> : <div className="panel-empty">No evidence has been submitted yet.</div>}
             {project.role==="freelancer" && ["AGREED","REVISION_REQUESTED"].includes(project.status) && project.funding.mode==="HOLD" && project.funding.status!=="HELD" && <div className="panel-empty funding-wait">You can submit your work once the client has secured the payment with PayPal.</div>}
             {project.role==="freelancer" && ["AGREED","REVISION_REQUESTED"].includes(project.status) && (project.funding.mode!=="HOLD" || project.funding.status==="HELD") && <form className="inline-form" onSubmit={e=>{e.preventDefault();run({action:"submit",id:project.id,url:evidenceUrl,notes:evidenceNotes},"Evidence submitted. The client can now run verification.");}}><h3>{project.evidence_url?"Submit a new version":"Submit your work"}</h3><label>Deployed HTTPS URL<input type="url" value={evidenceUrl} onChange={e=>setEvidenceUrl(e.target.value)} placeholder="https://your-project.example" required/></label><label>Evidence notes<textarea value={evidenceNotes} onChange={e=>setEvidenceNotes(e.target.value)} rows={3} placeholder="Describe what you delivered and how to test it." required/></label><button className="primary-button" disabled={busy}>Submit evidence <ArrowRight size={16}/></button></form>}</section>

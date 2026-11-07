@@ -417,3 +417,57 @@ h1{font-size:32px;font-weight:700;letter-spacing:-.6px;line-height:1.2}
 .funding-option.on{background:#fff;box-shadow:inset 0 0 0 2px var(--sky)}
 .funding-option:disabled{cursor:not-allowed;opacity:.6}
 @media(max-width:600px){.funding-choice{grid-template-columns:1fr}.held-tag{display:none}}
+
+/* ── The PayPal Vault ── */
+.vault{padding:22px 22px 18px}
+.vault-top{display:flex;align-items:flex-start;justify-content:space-between;gap:12px;margin-bottom:6px}
+.vault-top h2{font-size:15px;margin:0}
+.vault-top p{margin:3px 0 0;font-size:11.5px;color:var(--ink-3)}
+.vault-livebadge,.vault-live{display:inline-flex;align-items:center;gap:7px;font-size:11.5px;font-weight:650;color:#003087}
+.vault-livebadge{padding:5px 10px;border-radius:999px;background:#e8f0ff}
+.vault-live{padding:7px 12px}
+.vault-dot{width:7px;height:7px;border-radius:50%;background:#1f9e62;box-shadow:0 0 0 3px rgba(31,158,98,.18)}
+.vault-svg{display:block;width:100%;height:auto;overflow:visible}
+.vs-track{fill:none;stroke:#d6e0ef;stroke-width:2;stroke-dasharray:2 7;stroke-linecap:round}
+.vs-track.direct{opacity:0}
+.vault-svg.moving .vs-track:not(.direct){stroke:#a9c2ea}
+.vs-wallet-body{fill:#fff;stroke:#dfe6f1;stroke-width:1.5}
+.vs-wallet-line{stroke:#eef2f8;stroke-width:1.5}
+.vs-wallet-clasp{fill:#f3f6fb;stroke:#dfe6f1;stroke-width:1.5}
+.vs-wallet.on .vs-wallet-body{stroke:#9cbcf0;filter:drop-shadow(0 10px 16px rgba(20,60,150,.14))}
+.vs-ava.client{fill:#2f6fdc}.vs-ava.freelancer{fill:#1f9e62}
+.vs-ava-t{fill:#fff;font:700 8.5px var(--sans);text-anchor:middle}
+.vs-label{fill:var(--ink-2);font:600 12.5px var(--sans);text-anchor:middle}
+.vs-leg{fill:#0a2463}
+.vs-ring-bg{fill:none;stroke:rgba(255,255,255,.12);stroke-width:5}
+.vs-ring{fill:none;stroke:#ffc439;stroke-width:5;stroke-linecap:round;transition:stroke-dasharray .9s ease}
+.vs-door{transform-box:fill-box;transform-origin:left center;transition:transform .7s cubic-bezier(.3,.9,.3,1)}
+.vs-vault.open .vs-door{transform:perspective(400px) rotateY(-62deg)}
+.vs-door-face{fill:#1a4ba8;stroke:#5c8ce6;stroke-width:2}
+.vs-dial{transform-box:fill-box;transform-origin:center;transition:transform .9s cubic-bezier(.3,.9,.3,1)}
+.vs-vault.locked .vs-dial{transform:rotate(180deg)}
+.vs-dial-c{fill:#0e2f72;stroke:#8fb2f2;stroke-width:2}
+.vs-dial-s{stroke:#8fb2f2;stroke-width:2.5;stroke-linecap:round}
+.vs-coins{filter:drop-shadow(0 6px 8px rgba(160,110,0,.25))}
+.vs-coin-shadow{fill:rgba(15,31,61,.08)}
+.vs-coin-edge{fill:#d79a0b}
+.vs-coin-top{stroke:#fff3c4;stroke-width:1}
+.vs-amount{fill:#0e1f3d}
+.vs-amount-t{fill:#fff;font:700 11px var(--sans);text-anchor:middle}
+.vault-caption{display:flex;flex-direction:column;align-items:center;gap:3px;margin-top:4px;text-align:center}
+.vault-caption strong{font-size:15px;color:var(--ink)}
+.vault-caption span{font-size:12px;color:var(--ink-3)}
+.vault-history{display:flex;gap:0;margin-top:18px;padding-top:14px;border-top:1px solid #eef2f8;overflow-x:auto}
+.vh-point{position:relative;flex:1;min-width:92px;display:flex;flex-direction:column;align-items:center;gap:4px;border:0;background:none;padding:6px 4px;cursor:pointer;border-radius:10px;text-align:center}
+.vh-point::before{content:"";position:absolute;top:13px;left:0;right:0;height:2px;background:#e3e9f3;z-index:0}
+.vh-point:first-child::before{left:50%}.vh-point:last-child::before{right:50%}
+.vh-point i{position:relative;z-index:1;width:12px;height:12px;border-radius:50%;background:#fff;box-shadow:inset 0 0 0 2px #b9c8de}
+.vh-point.s-vault i{box-shadow:inset 0 0 0 2px #003087}
+.vh-point.s-freelancer i{box-shadow:inset 0 0 0 2px #1f9e62}
+.vh-point span{font-size:11px;font-weight:600;color:var(--ink-2);line-height:1.3}
+.vh-point small{font-size:10px;color:var(--ink-3)}
+.vh-point:hover{background:var(--wash-2)}
+.vh-point.on{background:#eef4ff}
+.vh-point.on i{background:#003087;box-shadow:0 0 0 4px #dbe7ff}
+@media(max-width:600px){.vault{padding:16px}.vh-point{min-width:84px}}
+@media(prefers-reduced-motion:reduce){.vs-door,.vs-dial,.vs-ring{transition:none}}
