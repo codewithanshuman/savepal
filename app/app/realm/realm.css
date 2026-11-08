@@ -312,6 +312,9 @@ button.hud{font:inherit;color:inherit;text-align:left;cursor:pointer}
 /* ── walk mode: the pad, the door prompt, and the flying coins ── */
 .hud-zoom .hud-walk{font-size:8px;letter-spacing:1px;color:#5fd39a}
 .hud-zoom .hud-walk.on{background:#5fd39a;color:#0d1422}
+.hud-zoom .hud-sky{font-size:7px;letter-spacing:1px;color:#ffd15c}
+.hud-zoom .hud-sky.night{background:#2a3566;color:#cfe0ff}
+.hud-zoom .hud-sky.day{background:#ffd15c;color:#0d1422}
 .walk-pad{position:absolute;z-index:9;left:96px;bottom:110px;width:156px;height:156px;display:grid;grid-template-columns:repeat(3,1fr);grid-template-rows:repeat(3,1fr);gap:4px;touch-action:none}
 .walk-pad button{border:3px solid #0d1422;background:rgba(27,35,51,.88);color:#ffd15c;font-size:18px;border-radius:12px;cursor:pointer;touch-action:none;box-shadow:0 4px 0 rgba(0,0,0,.35)}
 .walk-pad button:active{transform:translateY(2px);box-shadow:0 2px 0 rgba(0,0,0,.35);background:#ffc439;color:#0d1422}

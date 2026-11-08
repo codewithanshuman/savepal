@@ -1,13 +1,15 @@
 /*
- * The kingdom's life, alongside the engine's own ambient traffic and ships. Everything here either
- * moves (flags, sails, smoke, people, gulls, biplanes) or reports a real state of the agreement:
+ * The kingdom's life that answers to the agreement, alongside the town's own bustle (folk.ts).
+ * Everything here either moves (flags, sails, smoke, people at work, gulls, biplanes, galleys
+ * with their wakes) or reports a real state of the agreement:
  *
  *   PayPal holds the gold   -> the full palace guard is posted and the windmills turn fast
- *   the guild is working    -> the carpenter and the miner are at work in the guild yard
+ *   the guild is working    -> the carpenter hammers and the miner swings his pick in the yard
+ *   the wheat's stage       -> farmers sow, tend, harvest, then rest by the sheaves when paid
  *   inspectors on patrol    -> the architect stands at the page being read
  *   bounties paid           -> a golden stall in the bazaar for each
  *   an appeal is open       -> archers on watch at the port
- *   any money moves         -> the banner plane flies over with the news
+ *   any money moves         -> the banner plane flies over with the news and the town cheers
  */
 import Phaser from "phaser";
 import { SKY_DEPTH, projection } from "../reference-city/world/core/worldConstants";
@@ -18,12 +20,9 @@ import { BOUNTY_SLOTS, GUILD_FLAG, PORT_FLAG, TOWN } from "./textures/town";
 import { WINDMILL_HUB } from "./textures/farms";
 import { FLAG_FRAMES, GULL, PLANES, SAILS, flagKey, type FlagColor } from "./textures/sky";
 import { RES } from "./textures/atelier";
+import { Cast, Figure, PEOPLE, STILL, personKey, personUrl, type Effects, type FxKind, type Person, type Pose, type RoamPlan } from "./rig";
 
-export const PEOPLE = ["architect", "miner", "carpenter", "gardener", "chef", "spearman", "swordsman", "archer"] as const;
-export type Person = (typeof PEOPLE)[number];
-export const personKey = (p: Person) => `savepal:person:${p}`;
-export const personUrl = (p: Person) => `/realm/people/${p}.png`;
-const PERSON_SCALE = .27;
+export { PEOPLE, personKey, personUrl, type Person };
 
 export type LifeState = { held: boolean; paid: boolean; working: boolean; appealOpen: boolean; bounties: number; inspecting: string | null; banner: string; mainFlag: FlagColor };
 
@@ -32,17 +31,7 @@ export function structureDepth(s: Structure): number {
   return s.role === "palace" || s.role === "bazaar" ? projection.depth(s.x, s.y + 1) : projection.depth(s.x, s.y) + 5;
 }
 const at = (gx: number, gy: number, z = 0) => { const p = projection.project(gx, gy); return { x: p.x, y: p.y - z }; };
-
-/** Road walks: [x0, y0] to [x1, y1] along one street, and who walks it. */
-const WALKS: Array<{ who: Person; from: [number, number]; to: [number, number]; ms: number }> = [
-  { who: "chef", from: [19, 24], to: [41, 24], ms: 30000 },
-  { who: "gardener", from: [6, 13], to: [6, 34], ms: 32000 },
-  { who: "carpenter", from: [19, 12], to: [46, 12], ms: 36000 },
-  { who: "miner", from: [36, 1], to: [36, 34], ms: 42000 },
-  { who: "architect", from: [1, 30], to: [30, 30], ms: 38000 },
-  { who: "spearman", from: [5, 12], to: [17, 12], ms: 20000 },
-  { who: "gardener", from: [42, 1], to: [42, 34], ms: 40000 },
-];
+const field = (s: Structure, inset = 1.6) => ({ u0: s.x - inset, u1: s.x + inset, v0: s.y - inset, v1: s.y + inset });
 
 export class KingdomLife {
   private fixtures: Phaser.GameObjects.GameObject[] = [];
@@ -50,17 +39,17 @@ export class KingdomLife {
   private skyObjects: Phaser.GameObjects.GameObject[] = [];
   private timers: Phaser.Time.TimerEvent[] = [];
   private sails: Phaser.Tweens.Tween[] = [];
-  private walks: Phaser.Tweens.Tween[] = [];
+  private voyages: Phaser.Tweens.Tween[] = [];
+  private readonly planCast = new Cast();
+  private readonly stateCast = new Cast();
   private structures: Structure[] = [];
   private planSig = "";
   private stateSig = "";
   private bannerRun?: () => void;
   private bannerText?: Phaser.GameObjects.Text;
   private bannerCloth?: Phaser.GameObjects.Graphics;
-  /** Only the viewer's own reduced-motion setting stills the kingdom. */
-  private readonly still = typeof window !== "undefined" && typeof window.matchMedia === "function" && window.matchMedia("(prefers-reduced-motion: reduce)").matches;
 
-  constructor(private readonly scene: Phaser.Scene) {}
+  constructor(private readonly scene: Phaser.Scene, private readonly fx: Effects) {}
 
   private anims(): void {
     const a = this.scene.anims;
@@ -75,32 +64,30 @@ export class KingdomLife {
 
   private flag(x: number, y: number, color: FlagColor, depth: number, i = 0): Phaser.GameObjects.Sprite {
     const s = this.scene.add.sprite(x, y, flagKey(color, 0)).setOrigin(.04, .1).setScale(1 / RES).setDepth(depth);
-    if (!this.still) s.play({ key: `savepal:flag:${color}`, startFrame: i % FLAG_FRAMES });
+    if (!STILL) s.play({ key: `savepal:flag:${color}`, startFrame: i % FLAG_FRAMES });
     return s;
   }
 
-  private person(who: Person, gx: number, gy: number, z = 0, flip = false, extraDepth = 1): Phaser.GameObjects.Image {
-    const p = at(gx, gy, z);
-    return this.scene.add.image(p.x, p.y, personKey(who)).setOrigin(.5, 1).setScale(PERSON_SCALE).setFlipX(flip).setDepth(projection.depth(gx, gy) + extraDepth);
+  /** A person at grid (u, v, z), facing look (1 right, -1 left), in a pose; on a round if a plan is given. */
+  private person(cast: Cast, who: Person, u: number, v: number, opts: { z?: number; look?: number; pose?: Pose; fx?: FxKind; bias?: number; fidget?: boolean; plan?: RoamPlan } = {}): Figure {
+    const f = new Figure(this.scene, who, this.fx);
+    f.depthBias = opts.bias ?? 2;
+    f.place(u, v, opts.z ?? 0).look(opts.look ?? 1).setPose(opts.pose ?? "idle");
+    f.workFx = opts.fx ?? null; f.fidget = !!opts.fidget;
+    return cast.add(f, opts.plan);
   }
 
-  /** A person standing at work: a small rhythmic bob. */
-  private busy(img: Phaser.GameObjects.Image, ms = 520): void {
-    if (this.still) return;
-    this.scene.tweens.add({ targets: img, y: img.y - 3, duration: ms, yoyo: true, repeat: -1, ease: "Sine.easeInOut", delay: Math.random() * 400 });
-  }
-
-  /** Rebuilds the fixed life of the plan: flags, sails, smoke, walkers. Cheap to call; only redraws when the plan changes. */
+  /** Rebuilds the fixed life of the plan: flags, sails, smoke and the farm hands. Only redraws when the plan changes. */
   build(structures: Structure[]): void {
     const sig = structures.map(s => `${s.path}:${s.kind}`).join("|");
     this.structures = structures;
     if (sig === this.planSig) return;
     this.planSig = sig; this.stateSig = "";
-    this.walks.forEach(t => t.stop()); this.walks = [];
-    this.clear(this.fixtures); this.sails = [];
+    this.clear(this.fixtures); this.planCast.clear(); this.sails = [];
     this.timers.forEach(t => t.remove()); this.timers = [];
     this.anims();
     const add = <T extends Phaser.GameObjects.GameObject>(o: T) => { this.fixtures.push(o); return o; };
+    const cast = this.planCast;
     for (const s of structures) {
       const d = structureDepth(s);
       if (s.kind === "palace") PALACE_FLAGS.forEach((f, i) => { if (f.main) return; const p = at(s.x + f.u, s.y + f.v, f.z); add(this.flag(p.x, p.y, i % 2 ? "crimson" : "royal", d + 2, i)); });
@@ -108,40 +95,40 @@ export class KingdomLife {
       if (s.kind === "windmill") {
         const p = at(s.x + WINDMILL_HUB.u, s.y + WINDMILL_HUB.v, WINDMILL_HUB.z);
         const sail = add(this.scene.add.image(p.x, p.y, SAILS).setScale(1.35 / RES).setDepth(d + 3).setAngle(Math.random() * 90));
-        if (!this.still) this.sails.push(this.scene.tweens.add({ targets: sail, angle: "+=360", duration: 9000, repeat: -1 }));
+        if (!STILL) this.sails.push(this.scene.tweens.add({ targets: sail, angle: "+=360", duration: 9000, repeat: -1 }));
       }
-      if (s.kind === "guild" && !this.still) {
+      if (s.kind === "guild" && !STILL) {
         const p = at(s.x + GUILD_FLAG.u, s.y + GUILD_FLAG.v, GUILD_FLAG.z + 4);
-        this.timers.push(this.scene.time.addEvent({ delay: 700, loop: true, callback: () => this.puff(p.x, p.y, d + 4) }));
+        this.timers.push(this.scene.time.addEvent({ delay: 650, loop: true, callback: () => this.puff(p.x, p.y, d + 4) }));
       }
-      if (s.kind === "strawberries" || s.kind === "blueberries") { const g = add(this.person("gardener", s.x - .6, s.y + .4, 0, true)); this.busy(g, 700); }
-      // the chef stands on open paving in front of the fountain, between the two stall rows
-      if (s.kind === "bazaar") { const c = add(this.person("chef", s.x + .05, s.y + 1.8)); this.busy(c, 900); }
-      if (s.kind === "barn") add(this.person("miner", s.x + 1.6, s.y + .5, 0, true));
+      // smoke from every house's chimney (its stack stands at the back corner of the roof)
+      if ((s.kind.startsWith("homestead") || s.kind.startsWith("workshop")) && !STILL) {
+        const top = 12 + (s.kind === "homestead0" ? 1 : 2) * 34 + 36, p = at(s.x - 1.45, s.y - 1.65, top);
+        add(this.scene.add.particles(p.x, p.y, "savepal:puff", {
+          speedY: { min: -26, max: -14 }, speedX: { min: 3, max: 11 }, lifespan: 3600, scale: { start: .12, end: .62 },
+          alpha: { start: .5, end: 0 }, tint: 0xf2efe8, frequency: 520 + Math.random() * 400, quantity: 1,
+        }).setDepth(d + 6));
+      }
+      // farm hands: down the berry rows and through the orchard, picking as they go
+      if (s.kind === "strawberries" || s.kind === "blueberries" || s.kind === "orchard")
+        this.person(cast, "gardener", s.x - .6, s.y + .4, { look: -1, pose: "tend", fx: "leaf", plan: { area: field(s, 1.5), work: "tend", speed: .5, wait: [3800, 7200] } });
+      // the wheat follows the agreement: sown, tended, harvested, then the sheaves are in
+      if (s.kind.startsWith("wheat")) {
+        const stage = Number(s.kind.slice(5));
+        if (stage === 4) this.person(cast, "gardener", s.x + 1.2, s.y + 1.4, { look: -1, fidget: true });
+        else this.person(cast, "gardener", s.x, s.y, { pose: "tend", fx: stage === 3 ? "chips" : stage === 0 ? "dust" : "leaf", plan: { area: field(s, 1.7), work: "tend", speed: .45, wait: [4200, 8000] } });
+      }
+      // the chef presents his dish in front of the bazaar fountain, steam rising off the cloche
+      if (s.kind === "bazaar") this.person(cast, "chef", s.x + .05, s.y + 1.8, { pose: "serve" });
+      // the woodsman splits logs in the barnyard
+      if (s.kind === "barn") this.person(cast, "miner", s.x + 1.6, s.y + .5, { look: -1, pose: "mine", fx: "chips" });
     }
-    if (!this.still) for (const w of WALKS) add(this.walker(w.who, w.from, w.to, w.ms));
     if (!this.skyObjects.length) { this.buildSky(); this.buildSeas(); }
   }
 
   private puff(x: number, y: number, depth: number): void {
-    const c = this.scene.add.circle(x + (Math.random() - .5) * 4, y, 4 + Math.random() * 2, 0xf4f1ea, .7).setDepth(depth);
-    this.scene.tweens.add({ targets: c, y: y - 46, x: c.x + 14, scale: 2.4, alpha: 0, duration: 2600, ease: "Sine.easeOut", onComplete: () => c.destroy() });
-  }
-
-  /** A villager walking a street end to end and back, facing the way they walk. */
-  private walker(who: Person, from: [number, number], to: [number, number], ms: number): Phaser.GameObjects.Image {
-    const img = this.person(who, from[0], from[1]);
-    const goesRight = (to[0] - from[0]) - (to[1] - from[1]) > 0;
-    let forward = true;
-    this.walks.push(this.scene.tweens.addCounter({
-      from: 0, to: 1, duration: ms, yoyo: true, repeat: -1, delay: Math.random() * ms * .5,
-      onYoyo: () => { forward = false; }, onRepeat: () => { forward = true; },
-      onUpdate: (tw) => {
-        const t = tw.getValue() ?? 0, gx = from[0] + (to[0] - from[0]) * t, gy = from[1] + (to[1] - from[1]) * t, p = at(gx, gy);
-        if (img.active) img.setPosition(p.x, p.y - Math.abs(Math.sin(t * ms / 160)) * 2).setDepth(projection.depth(gx, gy) + 1).setFlipX(forward ? !goesRight : goesRight);
-      },
-    }));
-    return img;
+    const c = this.scene.add.image(x + (Math.random() - .5) * 4, y, "savepal:puff").setTint(0xf4f1ea).setAlpha(.75).setScale(.26).setDepth(depth);
+    this.scene.tweens.add({ targets: c, y: y - 54, x: c.x + 16, scale: .9, alpha: 0, duration: 2800, ease: "Sine.easeOut", onComplete: () => c.destroy() });
   }
 
   /** Re-poses the guards, workers, stalls, the main flag and the banner from the agreement's state. */
@@ -149,37 +136,41 @@ export class KingdomLife {
     const sig = JSON.stringify(state);
     if (sig === this.stateSig || !this.structures.length) return;
     this.stateSig = sig;
-    this.clear(this.stateful);
+    this.clear(this.stateful); this.stateCast.clear();
     const add = <T extends Phaser.GameObjects.GameObject>(o: T) => { this.stateful.push(o); return o; };
+    const cast = this.stateCast;
     const find = (pred: (s: Structure) => boolean) => this.structures.find(pred);
     const palace = find(s => s.kind === "palace"), bazaar = find(s => s.kind === "bazaar"), guild = find(s => s.kind === "guild"), port = find(s => s.kind === "port");
     if (palace) {
       const d = structureDepth(palace), main = PALACE_FLAGS.find(f => f.main)!, p = at(palace.x + main.u, palace.y + main.v, main.z);
       add(this.flag(p.x, p.y, state.mainFlag, d + 3).setScale(1.6 / RES));
-      PALACE_POSTS.gate.slice(0, state.held ? 2 : 1).forEach(([u, v], i) => add(this.person("spearman", palace.x + u, palace.y + v, 0, i === 1)));
-      PALACE_POSTS.walls.slice(0, state.held ? 4 : 2).forEach(([u, v, z], i) => add(this.person("archer", palace.x + u, palace.y + v, z, i % 2 === 1, 60)));
+      PALACE_POSTS.gate.slice(0, state.held ? 2 : 1).forEach(([u, v], i) => this.person(cast, "spearman", palace.x + u, palace.y + v, { look: i === 1 ? -1 : 1, pose: "guard" }));
+      PALACE_POSTS.walls.slice(0, state.held ? 4 : 2).forEach(([u, v, z], i) => this.person(cast, "archer", palace.x + u, palace.y + v, { z, look: i % 2 ? -1 : 1, pose: "watch", bias: 60 }));
+      // the knight marches his rounds across the forecourt and stands to at each end
       const [[pu0, pv0], [pu1, pv1]] = PALACE_POSTS.patrol;
-      const knight = add(this.person("swordsman", palace.x + pu0, palace.y + pv0, 0, false, 40));
-      if (!this.still) {
-        const b = at(palace.x + pu1, palace.y + pv1);
-        this.scene.tweens.add({ targets: knight, x: b.x, y: b.y, duration: 5600, yoyo: true, repeat: -1, ease: "Sine.easeInOut", onYoyo: () => knight.setFlipX(true), onRepeat: () => knight.setFlipX(false) });
-      }
+      this.person(cast, "swordsman", palace.x + pu0, palace.y + pv0, { pose: "guard", bias: 40, plan: {
+        spots: [{ u: palace.x + pu1, v: palace.y + pv1, pose: "guard", ms: 2400, look: -1 }, { u: palace.x + pu0, v: palace.y + pv0, pose: "guard", ms: 2400, look: 1 }],
+        walk: "march", work: "guard", speed: .55,
+      } });
     }
     if (guild) {
-      const c = add(this.person("carpenter", guild.x + 1.25, guild.y + 1.15, 0, true)); if (state.working) this.busy(c, 420);
-      if (state.working) { const m = add(this.person("miner", guild.x + 2.05, guild.y + .85)); this.busy(m, 360); }
+      this.person(cast, "carpenter", guild.x + 1.25, guild.y + 1.15, { look: -1, pose: state.working ? "hammer" : "idle", fx: "chips", fidget: !state.working });
+      if (state.working) this.person(cast, "miner", guild.x + 2.05, guild.y + .85, { pose: "mine", fx: "stone" });
     }
     const page = state.inspecting ? find(s => s.role === "page" && s.path === `page${state.inspecting!.startsWith("/") ? state.inspecting : `/${state.inspecting}`}`) : undefined;
-    if (page) { const arch = add(this.person("architect", page.x + .3, page.y + 2.3)); this.busy(arch, 600); }
-    else if (guild) add(this.person("architect", guild.x - .2, guild.y + 2.1));
+    if (page) this.person(cast, "architect", page.x + .3, page.y + 2.3, { pose: "chat", fidget: true });
+    else if (guild) this.person(cast, "architect", guild.x - .2, guild.y + 2.1, { fidget: true });
     if (bazaar) BOUNTY_SLOTS.slice(0, Math.min(state.bounties, BOUNTY_SLOTS.length)).forEach(([u, v]) => {
       const p = at(bazaar.x + u, bazaar.y + v);
       add(this.scene.add.image(p.x, p.y + TOWN.bountyStall.anchorY, TOWN.bountyStall.key).setOrigin(.5, 1).setScale(1 / RES).setDepth(projection.depth(bazaar.x + u, bazaar.y + v) + 1));
     });
-    if (port && state.appealOpen) [[3.2, .1], [4.2, -.1]].forEach(([u, v], i) => add(this.person("archer", port.x + u, port.y + v, 3, i === 1)));
+    if (port && state.appealOpen) [[3.2, .1], [4.2, -.1]].forEach(([u, v], i) => this.person(cast, "archer", port.x + u, port.y + v, { z: 3, look: i === 1 ? -1 : 1, pose: "watch" }));
     for (const t of this.sails) t.timeScale = state.held ? 2.2 : 1;
     this.setBanner(state.banner);
   }
+
+  /** Every frame: the people pose and walk their rounds. */
+  update(dt: number): void { this.planCast.update(dt); this.stateCast.update(dt); }
 
   /** The kingdom's corners on screen, for the sky's flight paths. */
   private bounds() {
@@ -197,8 +188,7 @@ export class KingdomLife {
     const banner = sky(this.scene.add.container(b.x0, b.y0 + (b.y1 - b.y0) * .2, [rope, cloth, text, red]).setDepth(SKY_DEPTH + 5).setData("baseScale", 1)) as Phaser.GameObjects.Container;
     const redShadow = sky(this.scene.add.ellipse(0, 0, 90, 22, 0x14260f, .16).setDepth(SKY_DEPTH - 50)) as Phaser.GameObjects.Ellipse;
     this.bannerText = text; this.bannerCloth = cloth;
-    const drawRope = () => { rope.clear().lineStyle(2, 0x5a4a32, 1).beginPath().moveTo(-58, 8).lineTo(-92, 12).strokePath(); };
-    drawRope();
+    rope.lineStyle(2, 0x5a4a32, 1).beginPath().moveTo(-58, 8).lineTo(-92, 12).strokePath();
     let flight: Phaser.Tweens.Tween | undefined;
     const run = () => {
       flight?.stop();
@@ -210,17 +200,17 @@ export class KingdomLife {
       });
     };
     this.bannerRun = run;
-    if (!this.still) { red.play("savepal:plane:red"); run(); } else banner.setVisible(false);
+    if (!STILL) { red.play("savepal:plane:red"); run(); } else banner.setVisible(false);
     // A second biplane flies the other way, higher, without a banner.
     const blue = sky(this.scene.add.sprite(b.x1, b.y0 + (b.y1 - b.y0) * .55, PLANES.blue[0]).setFlipX(true).setScale(1.1 / RES).setDepth(SKY_DEPTH + 4).setData("baseScale", 1.1 / RES)) as Phaser.GameObjects.Sprite;
     const blueShadow = sky(this.scene.add.ellipse(0, 0, 70, 18, 0x14260f, .14).setDepth(SKY_DEPTH - 50)) as Phaser.GameObjects.Ellipse;
-    if (!this.still) {
+    if (!STILL) {
       blue.play("savepal:plane:blue");
       const loop = () => { blue.setPosition(b.x1, b.y0 + (b.y1 - b.y0) * (.45 + Math.random() * .3)); this.scene.tweens.add({ targets: blue, x: b.x0, duration: 26000, onUpdate: () => blueShadow.setPosition(blue.x + 30, blue.y + 300), onComplete: () => this.scene.time.delayedCall(9000, loop) }); };
       this.scene.time.delayedCall(6000, loop);
     } else blue.setVisible(false);
     // Gulls in loose flocks.
-    if (!this.still) {
+    if (!STILL) {
       const flock = () => {
         const y = b.y0 + Math.random() * (b.y1 - b.y0) * .8, gulls: Phaser.GameObjects.Sprite[] = [];
         for (let i = 0; i < 6; i++) gulls.push(this.scene.add.sprite(b.x1 + i * 40, y + Math.abs(i - 2.5) * 22, GULL[0]).setScale(1.6 / RES).setDepth(SKY_DEPTH + 6).setData("baseScale", 1.6 / RES).play({ key: "savepal:gull", startFrame: i % 2 }));
@@ -231,9 +221,9 @@ export class KingdomLife {
     }
   }
 
-  /** Galleys under sail on the open sea: one along the southern coast, one up the eastern. */
+  /** Galleys under sail on the open sea, each trailing a foaming wake: one along the southern coast, one up the eastern. */
   private buildSeas(): void {
-    if (this.still) return;
+    if (STILL) return;
     const W = CITY_SIZE.width, H = CITY_SIZE.height;
     const routes: Array<{ from: [number, number]; to: [number, number]; flip: boolean; ms: number }> = [
       { from: [-8, H + 6.5], to: [W + 8, H + 6.5], flip: false, ms: 150000 },
@@ -243,16 +233,44 @@ export class KingdomLife {
     ];
     routes.forEach((r, i) => {
       const ship = this.scene.add.image(0, 0, TOWN.galley.key).setOrigin(.5, 1 - TOWN.galley.anchorY / TOWN.galley.height).setFlipX(r.flip).setScale(1.25 / RES);
-      this.skyObjects.push(ship);
-      this.walks.push(this.scene.tweens.addCounter({
+      const wake = this.scene.add.graphics();
+      this.skyObjects.push(ship, wake);
+      const len = Math.hypot(r.to[0] - r.from[0], r.to[1] - r.from[1]), du = (r.to[0] - r.from[0]) / len, dv = (r.to[1] - r.from[1]) / len;
+      this.voyages.push(this.scene.tweens.addCounter({
         from: 0, to: 1, duration: r.ms, repeat: -1, delay: i * 20000,
         onUpdate: (tw) => {
           const t = tw.getValue() ?? 0, gx = r.from[0] + (r.to[0] - r.from[0]) * t, gy = r.from[1] + (r.to[1] - r.from[1]) * t, p = at(gx, gy);
           if (!ship.active) return;
-          ship.setPosition(p.x, p.y + Math.sin(t * 900) * 2).setDepth(projection.depth(gx, gy)).setAlpha(Math.min(1, t * 14, (1 - t) * 14));
+          const fade = Math.min(1, t * 14, (1 - t) * 14), roll = Math.sin(t * 900) * 2;
+          ship.setPosition(p.x, p.y + roll).setDepth(projection.depth(gx, gy)).setAlpha(fade).setAngle(Math.sin(t * 620) * 1.2);
+          this.drawWake(wake, gx, gy, du, dv, fade, this.scene.time.now);
+          wake.setDepth(ship.depth - 1);
         },
       }));
     });
+  }
+
+  /** A V of foam opening behind the stern, a churned trail down the middle and a bow wave. */
+  private drawWake(g: Phaser.GameObjects.Graphics, gx: number, gy: number, du: number, dv: number, alpha: number, now: number): void {
+    g.clear();
+    if (alpha <= 0) return;
+    const half = 2.1, pu = -dv, pv = du;
+    const sea = (u: number, v: number) => at(u, v);
+    const stern = { u: gx - du * half, v: gy - dv * half }, bow = { u: gx + du * half, v: gy + dv * half };
+    for (const side of [-1, 1]) {
+      for (let k = 0; k < 6; k++) {
+        const a = k / 6, b = (k + 1) / 6, L = 3.4;
+        const p0 = sea(stern.u - du * L * a + pu * side * (.25 + L * .32 * a), stern.v - dv * L * a + pv * side * (.25 + L * .32 * a));
+        const p1 = sea(stern.u - du * L * b + pu * side * (.25 + L * .32 * b), stern.v - dv * L * b + pv * side * (.25 + L * .32 * b));
+        g.lineStyle(3.2 - a * 2, 0xffffff, alpha * .7 * (1 - a)).lineBetween(p0.x, p0.y, p1.x, p1.y);
+      }
+      const b0 = sea(bow.u + pu * side * .18, bow.v + pv * side * .18), b1 = sea(bow.u - du * .9 + pu * side * .55, bow.v - dv * .9 + pv * side * .55);
+      g.lineStyle(2.4, 0xffffff, alpha * .8).lineBetween(b0.x, b0.y, b1.x, b1.y);
+    }
+    for (let k = 0; k < 9; k++) {
+      const a = ((k + (now / 900) % 1) / 9), p = sea(stern.u - du * 3 * a + pu * Math.sin(k * 2.3 + now / 400) * .12, stern.v - dv * 3 * a + pv * Math.sin(k * 2.3 + now / 400) * .12);
+      g.fillStyle(0xffffff, alpha * .55 * (1 - a)).fillEllipse(p.x, p.y, 16 * (1 - a * .5), 6 * (1 - a * .5));
+    }
   }
 
   private setBanner(message: string): void {
@@ -276,8 +294,15 @@ export class KingdomLife {
     }
   }
 
-  /** Money moved: send the banner plane over now with the news. */
-  celebrate(): void { if (!this.still) this.bannerRun?.(); }
+  /** Sky objects, for the night to dim. */
+  get sky(): readonly Phaser.GameObjects.GameObject[] { return this.skyObjects; }
+
+  /** Money moved: send the banner plane over now with the news, and everyone cheers. */
+  celebrate(): void {
+    if (STILL) return;
+    this.bannerRun?.();
+    this.planCast.cheer(); this.stateCast.cheer();
+  }
 
   private clear(list: Phaser.GameObjects.GameObject[]): void {
     for (const o of list) { this.scene.tweens.killTweensOf(o); o.destroy(); }
@@ -286,8 +311,9 @@ export class KingdomLife {
 
   destroy(): void {
     this.timers.forEach(t => t.remove()); this.timers = [];
-    this.walks.forEach(t => t.stop()); this.walks = [];
+    this.voyages.forEach(t => t.stop()); this.voyages = [];
     this.clear(this.fixtures); this.clear(this.stateful); this.clear(this.skyObjects);
+    this.planCast.clear(); this.stateCast.clear();
     this.planSig = ""; this.stateSig = "";
   }
 }

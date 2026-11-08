@@ -5,6 +5,7 @@ import PayPalCheckout from "../../paypal-checkout";
 import { setSfxEnabled, sfx, sfxEnabled } from "./sfx";
 import { UNLOCKS, housesBuilt, isPaid, levelFor, rewards } from "./progress";
 import { RealmCanvas, type RealmCanvasHandle } from "./city/RealmCanvas";
+import type { SkyMode } from "./city/night";
 import { MAX_HOMES, type RealmInput } from "./city/layout";
 import type { RealmPick, RealmPlace } from "./city/SavePalScene";
 import { coinIconUrl, coinPileUrl } from "./city/coins";
@@ -119,6 +120,14 @@ export default function Realm({ id }: { id: string }) {
   const [near, setNear] = useState<string | null>(null);
   useEffect(() => { setSound(sfxEnabled()); }, []);
   const toggleSound = () => { const on = !sound; setSfxEnabled(on); setSound(on); if (on) sfx.click(); };
+  // the kingdom keeps the viewer's clock by default; the sky button holds it at day or night instead
+  const [sky, setSky] = useState<SkyMode>("auto");
+  useEffect(() => { try { const m = localStorage.getItem("savepal:sky"); if (m === "day" || m === "night") setSky(m); } catch { /* storage unavailable */ } }, []);
+  const cycleSky = () => {
+    const next: SkyMode = sky === "auto" ? "day" : sky === "day" ? "night" : "auto";
+    sfx.click(); setSky(next);
+    try { localStorage.setItem("savepal:sky", next); } catch { /* storage unavailable */ }
+  };
   /** Opening a building plays its door; closing plays it backwards. */
   const enter = (l: Landmark | null) => { if (l) { sfx.open(); realm.current?.focus(l); } setCourt(l); setPicked(null); };
   const leave = () => { sfx.close(); setCourt(null); };
@@ -300,7 +309,7 @@ export default function Realm({ id }: { id: string }) {
   const others = list.projects.filter(x => x.id !== id);
 
   return <main className="realm">
-    {realmInput && <RealmCanvas ref={realm} input={realmInput} rewards={bubbleRewards} onPick={pick} onCollect={collect} onNear={setNear} />}
+    {realmInput && <RealmCanvas ref={realm} input={realmInput} rewards={bubbleRewards} onPick={pick} onCollect={collect} onNear={setNear} sky={sky} />}
     {pops.map(q => <span key={q.id} className="realm-pop" style={{ left: q.x, top: q.y }} aria-hidden="true">+{q.xp} XP</span>)}
 
     <div className="hud-top" aria-label="Town progress">
@@ -344,6 +353,7 @@ export default function Realm({ id }: { id: string }) {
       <button onClick={() => { sfx.click(); realm.current?.zoom(-1); }} aria-label="Zoom out">−</button>
       <button onClick={() => { sfx.click(); realm.current?.fit(); }} aria-label="Show the whole kingdom">FIT</button>
       <button className={`hud-walk ${walking ? "on" : ""}`} onClick={() => { sfx.click(); if (walking) { realm.current?.stopWalk(); setWalking(false); setNear(null); } else { setCourt(null); realm.current?.walk(p.role === "client" ? "swordsman" : "architect"); setWalking(true); } }} aria-pressed={walking} aria-label={walking ? "Stop walking" : "Walk the kingdom"} title={walking ? "Stop walking" : "Walk the kingdom (arrow keys or WASD)"}>{walking ? "EXIT" : "WALK"}</button>
+      <button className={`hud-sky ${sky}`} onClick={cycleSky} aria-label={`Sky: ${sky === "auto" ? "following your clock" : sky}. Change it`} title={sky === "auto" ? "Day and night follow your clock" : sky === "day" ? "Always day" : "Always night"}>{sky === "auto" ? "AUTO" : sky === "day" ? "DAY" : "NIGHT"}</button>
       <button className={`hud-sound ${sound ? "" : "off"}`} onClick={toggleSound} aria-pressed={sound} aria-label={sound ? "Mute sounds" : "Turn sounds on"} title={sound ? "Sound on" : "Sound off"}>{sound ? "♪" : "×"}</button>
     </div>
 

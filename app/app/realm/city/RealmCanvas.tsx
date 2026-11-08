@@ -9,6 +9,7 @@ import { forwardRef, useEffect, useImperativeHandle, useRef } from "react";
 import type { RealmInput } from "./layout";
 import type { Person } from "./life";
 import type { RealmPick, RealmPlace, RealmReward, SavePalScene } from "./SavePalScene";
+import type { SkyMode } from "./night";
 
 export type RealmCanvasHandle = {
   focus(place: RealmPlace): void; zoom(dir: 1 | -1): void; fit(): void; celebrate(): void;
@@ -19,6 +20,8 @@ type Props = {
   input: RealmInput; rewards: RealmReward[];
   onPick(pick: RealmPick): void; onCollect(key: string, screen: { x: number; y: number }): void;
   onNear(label: string | null): void;
+  /** Day, night or the viewer's clock. */
+  sky: SkyMode;
 };
 
 export const RealmCanvas = forwardRef<RealmCanvasHandle, Props>(function RealmCanvas(props, ref) {
@@ -48,6 +51,7 @@ export const RealmCanvas = forwardRef<RealmCanvasHandle, Props>(function RealmCa
       const dpr = Math.min(2, window.devicePixelRatio || 1);
       const s = new SavePalScene();
       s.setDpr(dpr);
+      s.setSky(latest.current.sky);
       s.onPick(pick => latest.current.onPick(pick));
       s.onCollect((key, at) => latest.current.onCollect(key, at));
       s.onNear(label => latest.current.onNear(label));
@@ -77,6 +81,7 @@ export const RealmCanvas = forwardRef<RealmCanvasHandle, Props>(function RealmCa
 
   const inputKey = JSON.stringify(props.input);
   useEffect(() => { if (scene.current?.scene?.isActive()) scene.current.setRealm(latest.current.input); }, [inputKey]);
+  useEffect(() => { scene.current?.setSky(props.sky); }, [props.sky]);
   const rewardKey = props.rewards.map(r => r.key).join("|");
   useEffect(() => { scene.current?.setRewards(latest.current.rewards); }, [rewardKey]);
 

@@ -1,14 +1,22 @@
 /*
  * The island itself: a raised, box-shaped kingdom standing in the sea. The terrain pass lays the
  * top (grass, streets, plazas) with a square coast; this module adds what makes it a landmass --
- * layered earth cliffs on the near sides, sandy beaches on the far shores, two waterfalls with their
- * streams, foam and mist, surf breaking along the cliff foot, a forest ring and drifting clouds.
+ * layered earth cliffs on the near sides, sandy beaches on the far shores, surf breaking along the
+ * cliff foot, a forest ring, drifting clouds, and two waterfalls.
+ *
+ * Each waterfall is a small piece of scenery in its own right: a spring wells up among boulders on
+ * the grass ring and runs as a meandering stream to the cliff edge, where it pours between rocks
+ * as a curved sheet that bows outward and widens as it falls. Streaks race down it (accelerating,
+ * as falling water does), droplets peel off its edges, and the wet rock behind it darkens. At the
+ * foot it churns into a foam cloud, throws spray, raises mist with a faint rainbow in it, and sends
+ * ripple rings and foam drifting out across the sea. The moving parts are redrawn every frame
+ * (only while in view).
  */
 import Phaser from "phaser";
 import { GROUND_DEPTH, SKY_DEPTH, projection } from "../reference-city/world/core/worldConstants";
 import { setCoast } from "../reference-city/layouts/terrain";
 import { CITY_SIZE } from "./layout";
-import { Atelier, bakeAll, RES, type Asset } from "./textures/atelier";
+import { bakeAll, RES, type Asset } from "./textures/atelier";
 
 /** A grass ring around the field, then the cliff edge. */
 export const RINGS = 2;
@@ -16,8 +24,13 @@ setCoast({ countryside: RINGS, sand: 0, jitter: 0, square: true });
 
 const U0 = -RINGS - .5, V0 = -RINGS - .5, U1 = CITY_SIZE.width - 1 + RINGS + .5, V1 = CITY_SIZE.height - 1 + RINGS + .5;
 const CLIFF = 130;
-/** Waterfalls: one on each near face, fed by a stream from a spring on the land. */
-const FALLS: Array<{ face: "v" | "u"; at: number; spring: number }> = [{ face: "v", at: 4.2, spring: 2.6 }, { face: "u", at: 30.4, spring: 2.4 }];
+/** Waterfalls: one on each near face, fed by a short stream from a spring on the grass ring. */
+const FALLS: Array<{ face: "v" | "u"; at: number; spring: number; half: number }> = [
+  { face: "v", at: 4.2, spring: 1.55, half: .62 },
+  { face: "u", at: 30.4, spring: 1.5, half: .62 },
+];
+/** Where each spring wells up (grid), for the ducks that paddle on it. */
+export const POOLS: ReadonlyArray<{ u: number; v: number }> = FALLS.map(f => f.face === "v" ? { u: f.at, v: V1 - f.spring } : { u: U1 - f.spring, v: f.at });
 
 const TREES: Record<string, Asset> = {
   oak: { key: "savepal:tree:oak", width: 90, height: 120, anchorY: 14 },
@@ -26,8 +39,14 @@ const TREES: Record<string, Asset> = {
   cloud: { key: "savepal:cloud", width: 260, height: 120, anchorY: 60 },
 };
 
-const at = (gx: number, gy: number, z = 0) => { const p = projection.project(gx, gy); return { x: p.x, y: p.y - z }; };
+type P = { x: number; y: number };
+const at = (gx: number, gy: number, z = 0): P => { const p = projection.project(gx, gy); return { x: p.x, y: p.y - z }; };
 const hash = (a: number, b: number) => { const x = Math.sin(a * 127.1 + b * 311.7) * 43758.5453; return x - Math.floor(x); };
+const frac = (x: number) => x - Math.floor(x);
+export const mixColor = (a: number, b: number, t: number) => {
+  const ch = (s: number) => Math.round(((a >> s) & 255) + (((b >> s) & 255) - ((a >> s) & 255)) * t);
+  return (ch(16) << 16) | (ch(8) << 8) | ch(0);
+};
 
 function bakeIsland(scene: Phaser.Scene): void {
   bakeAll(scene, TREES, {
@@ -36,17 +55,36 @@ function bakeIsland(scene: Phaser.Scene): void {
     birch: a => { const g = a.g, foot = a.at([0, 0, 0]); g.fillStyle(0x1c2e14, .2).fillEllipse(foot.x + 5, foot.y + 2, 24, 10); a.line(0xf4f1ea, [[0, 0, 0], [0, 0, 40]], 3.4); for (const z of [10, 22, 32]) { const p = a.at([0, 0, z]); g.fillStyle(0x3a3328, 1).fillRect(p.x - 1.6, p.y, 3.2, 1.6); } for (const [dx, dz, r, c] of [[-8, 44, 12, 0x7fbf4a], [8, 46, 11, 0x8fd060], [0, 56, 13, 0x9bd86a]] as const) { const p = a.at([0, 0, dz]); g.fillStyle(c, 1).fillCircle(p.x + dx, p.y, r); } },
     cloud: a => { const g = a.g, o = a.at([0, 0, 0]); for (const [dx, dy, r, alpha] of [[-60, 8, 34, .9], [-20, -8, 44, .95], [30, 0, 40, .95], [70, 10, 28, .9], [0, 16, 46, .9]] as const) { g.fillStyle(0xffffff, alpha).fillCircle(o.x + dx, o.y + dy, r); } g.fillStyle(0xdfe9f3, .7).fillEllipse(o.x + 4, o.y + 34, 200, 26); },
   });
-  if (!scene.textures.exists("savepal:mote")) {
-    const g = scene.make.graphics({ x: 0, y: 0 }, false);
-    g.fillStyle(0xffffff, 1).fillCircle(8, 8, 8); g.generateTexture("savepal:mote", 16, 16); g.destroy();
-  }
 }
 
-type Fall = { g: Phaser.GameObjects.Graphics; a: { x: number; y: number }; b: { x: number; y: number }; seed: number };
+/** A boulder: an irregular, lit stone with a shaded underside, a highlight and (if dry) a cap of moss. */
+function boulder(g: Phaser.GameObjects.Graphics, x: number, y: number, r: number, seed: number, wet = false, moss = true): void {
+  const base = wet ? 0x5d5750 : 0x8b8276, light = wet ? 0x7d776e : 0xb6ad9d, dark = wet ? 0x3e3a35 : 0x635b50;
+  const pts: P[] = [];
+  for (let i = 0; i < 9; i++) { const a = i / 9 * Math.PI * 2, k = .78 + hash(seed, i) * .32; pts.push({ x: x + Math.cos(a) * r * k, y: y + Math.sin(a) * r * k * .72 - (Math.sin(a) < 0 ? r * .18 : 0) }); }
+  g.fillStyle(0x1d2b16, .25).fillEllipse(x + r * .25, y + r * .55, r * 2.1, r * .8, 12);
+  g.fillStyle(dark, 1).fillPoints(pts, true);
+  g.fillStyle(base, 1).fillPoints(pts.map(p => ({ x: x + (p.x - x) * .92 - r * .06, y: y + (p.y - y) * .86 - r * .1 })), true);
+  g.fillStyle(light, 1).fillPoints(pts.slice(4, 9).map(p => ({ x: x + (p.x - x) * .62 - r * .16, y: y + (p.y - y) * .55 - r * .22 })).concat([{ x: x - r * .1, y: y - r * .05 }]), true);
+  g.fillStyle(0xffffff, wet ? .5 : .28).fillEllipse(x - r * .3, y - r * .42, r * .5, r * .18, 8);
+  if (moss && !wet) g.fillStyle(0x5f9a3e, .9).fillEllipse(x - r * .15, y - r * .52, r * .9, r * .3, 10).fillStyle(0x7fbf4a, .8).fillEllipse(x - r * .25, y - r * .6, r * .45, r * .14, 8);
+}
+
+type Fall = {
+  back: Phaser.GameObjects.Graphics; front: Phaser.GameObjects.Graphics;
+  a: P; b: P; out: P; H: number; seed: number;
+  along: (t: number, w: number) => P; width: (t: number) => number; bend: (t: number) => number; pool: P;
+  /** The front half of a ripple ring (the half in front of the cliff), as a range of screen angles. */
+  arc: [number, number];
+  view: Phaser.Geom.Rectangle;
+  /** Everything of this fall that can be skipped while it is off screen. */
+  parts: Phaser.GameObjects.GameObject[];
+};
 
 export class Island {
   private objects: Phaser.GameObjects.GameObject[] = [];
   private falls: Fall[] = [];
+  private rainbows: Phaser.GameObjects.Graphics[] = [];
   private built = false;
   private readonly still = typeof window !== "undefined" && typeof window.matchMedia === "function" && window.matchMedia("(prefers-reduced-motion: reduce)").matches;
   constructor(private readonly scene: Phaser.Scene) {}
@@ -58,21 +96,20 @@ export class Island {
     const add = <T extends Phaser.GameObjects.GameObject>(o: T) => { this.objects.push(o); return o; };
     // beaches along the far shores
     const beach = add(this.scene.add.graphics().setDepth(GROUND_DEPTH + 3));
-    const sand = (pts: Array<{ x: number; y: number }>, c: number) => beach.fillStyle(c, 1).fillPoints(pts, true);
+    const sand = (pts: P[], c: number) => beach.fillStyle(c, 1).fillPoints(pts, true);
     const B = .55;
     sand([at(U0, V0), at(U1, V0), at(U1, V0 + B), at(U0 + B, V0 + B), at(U0 + B, V1), at(U0, V1)], 0xeedca9);
     sand([at(U0, V0), at(U1, V0), at(U1, V0 + .14), at(U0 + .14, V0 + .14), at(U0 + .14, V1), at(U0, V1)], 0xf6e8c2);
     // the near cliffs: turf lip, soil, then bands of rock down to the sea
     const cliff = add(this.scene.add.graphics().setDepth(GROUND_DEPTH + 4));
-    const face = (a: { x: number; y: number }, b: { x: number; y: number }, lit: boolean) => {
+    const face = (a: P, b: P, lit: boolean) => {
       const bands: Array<[number, number, number]> = [[0, 10, lit ? 0x5fa840 : 0x4f8f36], [10, 46, lit ? 0x8a6340 : 0x6e4c30], [46, 78, lit ? 0x9b8a72 : 0x7a6c58], [78, 104, lit ? 0x887965 : 0x6b5f4e], [104, CLIFF, lit ? 0x6f6353 : 0x574d41]];
       for (const [z0, z1, c] of bands) cliff.fillStyle(c, 1).fillPoints([{ x: a.x, y: a.y + z0 }, { x: b.x, y: b.y + z0 }, { x: b.x, y: b.y + z1 }, { x: a.x, y: a.y + z1 }], true);
-      // cracks, stones and roots for texture
       const n = Math.round(Math.hypot(b.x - a.x, b.y - a.y) / 26);
       for (let i = 0; i < n; i++) {
         const t = (i + hash(i, lit ? 3 : 7)) / n, x = a.x + (b.x - a.x) * t, y = a.y + (b.y - a.y) * t;
         cliff.lineStyle(1.2, 0x3e352c, .55).beginPath().moveTo(x, y + 50 + hash(i, 1) * 14).lineTo(x + 3, y + 70 + hash(i, 2) * 20).lineTo(x - 2, y + 92 + hash(i, 4) * 18).strokePath();
-        cliff.fillStyle(0xb8a88e, .7).fillEllipse(x + 8, y + 58 + hash(i, 5) * 40, 7, 4);
+        cliff.fillStyle(0xb8a88e, .7).fillEllipse(x + 8, y + 58 + hash(i, 5) * 40, 7, 4, 8);
         if (hash(i, 9) > .6) cliff.lineStyle(1, 0x4a3424, .7).beginPath().moveTo(x - 4, y + 12).lineTo(x - 6, y + 26).strokePath();
       }
       cliff.lineStyle(2, lit ? 0x8fd060 : 0x6fae49, 1).beginPath().moveTo(a.x, a.y + 1).lineTo(b.x, b.y + 1).strokePath();
@@ -81,7 +118,7 @@ export class Island {
     face(at(U1, V1), at(U1, V0), false);
     // surf breaking along the cliff foot
     const surf = add(this.scene.add.graphics().setDepth(GROUND_DEPTH + 3.5));
-    const surfLine = (a: { x: number; y: number }, b: { x: number; y: number }) => {
+    const surfLine = (a: P, b: P) => {
       const n = 60;
       for (let w = 0; w < 2; w++) {
         surf.lineStyle(w ? 2 : 4, 0xffffff, w ? .5 : .75).beginPath();
@@ -91,35 +128,12 @@ export class Island {
     };
     surfLine(at(U0, V1), at(U1, V1)); surfLine(at(U1, V1), at(U1, V0));
     if (!this.still) this.scene.tweens.add({ targets: surf, alpha: .45, duration: 1800, yoyo: true, repeat: -1, ease: "Sine.easeInOut" });
-    // the waterfalls and their streams: a channel across the land that widens to the cliff edge,
-    // then falling water drawn on the cliff face itself (redrawn each frame in update())
-    for (const f of FALLS) {
-      const along = (t: number, w: number) => f.face === "v" ? at(f.at + w, V1 - f.spring * (1 - t)) : at(U1 - f.spring * (1 - t), f.at + w);
-      const stream = add(this.scene.add.graphics().setDepth(GROUND_DEPTH + 5));
-      const steps = 10, bank: Array<{ x: number; y: number }> = [], water: Array<{ x: number; y: number }> = [];
-      for (let i = 0; i <= steps; i++) { const t = i / steps, w = .26 + t * .26; bank.push(along(t, -w - .08)); water.push(along(t, -w)); }
-      for (let i = steps; i >= 0; i--) { const t = i / steps, w = .26 + t * .26; bank.push(along(t, w + .08)); water.push(along(t, w)); }
-      stream.fillStyle(0x7b6a4e, 1).fillPoints(bank, true).fillStyle(0x3f9fd8, 1).fillPoints(water, true);
-      for (let i = 1; i < steps; i++) { const t = i / steps, p = along(t, Math.sin(i * 1.7) * .12); stream.fillStyle(0xd8f0ff, .7).fillEllipse(p.x, p.y, 10, 2.2); }
-      const pool = along(0, 0);
-      stream.fillStyle(0x7b6a4e, 1).fillEllipse(pool.x, pool.y + 2, 84, 38).fillStyle(0x3f9fd8, 1).fillEllipse(pool.x, pool.y, 74, 31).fillStyle(0x6fc0ef, .8).fillEllipse(pool.x - 8, pool.y - 4, 34, 10);
-      for (const [du, dv] of [[-.62, -.32], [.6, -.24], [-.5, .42], [.45, .4]] as const) { const r = f.face === "v" ? at(f.at + du, V1 - f.spring + dv) : at(U1 - f.spring + dv, f.at + du); stream.fillStyle(0x8f877a, 1).fillEllipse(r.x, r.y + 1, 18, 10).fillStyle(0xb8b0a2, 1).fillEllipse(r.x - 2, r.y - 2, 12, 6); }
-      const a = f.face === "v" ? at(f.at - .52, V1) : at(U1, f.at - .52), b = f.face === "v" ? at(f.at + .52, V1) : at(U1, f.at + .52);
-      const g = add(this.scene.add.graphics().setDepth(GROUND_DEPTH + 6));
-      this.falls.push({ g, a, b, seed: this.falls.length * 17 });
-      this.drawFall(this.falls[this.falls.length - 1]!, 0);
-      const foot = { x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 + CLIFF + 8 };
-      if (!this.still) {
-        add(this.scene.add.particles(foot.x, foot.y, "savepal:mote", {
-          x: { min: -34, max: 34 }, speedY: { min: -46, max: -16 }, speedX: { min: -14, max: 14 }, lifespan: 1700, scale: { start: .55, end: 1.5 }, alpha: { start: .55, end: 0 }, quantity: 2, frequency: 80, tint: 0xeaf6ff,
-        }).setDepth(GROUND_DEPTH + 7));
-      }
-    }
-    // the forest ring: our trees on the grass ring, thinning where the port's pier runs out
+    FALLS.forEach((spec, i) => this.buildFall(spec, i, add));
+    // the forest ring: our trees on the grass ring, clear of the port's quay and the springs
     for (let gy = Math.ceil(V0); gy <= Math.floor(V1); gy++) for (let gx = Math.ceil(U0); gx <= Math.floor(U1); gx++) {
       const inRing = gx < 0 || gy < 0 || gx > CITY_SIZE.width - 1 || gy > CITY_SIZE.height - 1;
       if (!inRing || skip(gx, gy) || hash(gx, gy) < .42) continue;
-      if (FALLS.some(f => (f.face === "v" ? Math.abs(gx - f.at) < 1.2 && gy > CITY_SIZE.height - 1 : Math.abs(gy - f.at) < 1.2 && gx > CITY_SIZE.width - 1))) continue;
+      if (FALLS.some(f => (f.face === "v" ? Math.abs(gx - f.at) < 1.7 && gy > CITY_SIZE.height - 1 : Math.abs(gy - f.at) < 1.7 && gx > CITY_SIZE.width - 1))) continue;
       const u = gx + (hash(gy, gx) - .5) * .5, v = gy + (hash(gx + 3, gy) - .5) * .5, kind = hash(gx * 2, gy * 3);
       const tree = kind < .45 ? TREES.oak! : kind < .75 ? TREES.pine! : TREES.birch!;
       const p = at(u, v);
@@ -131,6 +145,7 @@ export class Island {
       for (let i = 0; i < 6; i++) {
         const y = top + hash(i, 4) * (bottom - top), x = left + hash(i, 8) * (right - left), sc = (1.1 + hash(i, 2) * .9) / RES;
         const cloud = add(this.scene.add.image(x, y, TREES.cloud!.key).setScale(sc).setAlpha(.92).setDepth(SKY_DEPTH + 2));
+        cloud.setData("cloud", true);
         const shadow = add(this.scene.add.ellipse(x + 40, y + 300, 220 * sc * RES, 50 * sc * RES, 0x14260f, .1).setDepth(SKY_DEPTH - 60));
         const drift = () => this.scene.tweens.add({ targets: [cloud, shadow], x: `+=${right - left}`, duration: 220000 + hash(i, 6) * 120000, onComplete: () => { cloud.x -= right - left + 600; shadow.x = cloud.x + 40; drift(); } });
         drift();
@@ -138,36 +153,182 @@ export class Island {
     }
   }
 
-  /** Falling water: a sheet on the cliff face with streaks sliding down, foam at the lip and a churning pool. */
-  private drawFall(f: Fall, time: number): void {
-    const { g, a, b } = f, H = CLIFF + 6, flow = time * .16;
-    g.clear();
-    g.fillStyle(0x2f86c4, .96).fillPoints([a, b, { x: b.x, y: b.y + H }, { x: a.x, y: a.y + H }], true);
-    g.fillStyle(0x5fb6ea, .9).fillPoints([a, { x: a.x + (b.x - a.x) * .55, y: a.y + (b.y - a.y) * .55 }, { x: a.x + (b.x - a.x) * .55, y: a.y + (b.y - a.y) * .55 + H }, { x: a.x, y: a.y + H }], true);
-    for (let k = 0; k < 11; k++) {
-      const t = (k + .5) / 11, x = a.x + (b.x - a.x) * t, y0 = a.y + (b.y - a.y) * t, len = 12 + (k % 3) * 5;
-      for (let off = ((flow + k * 23 + f.seed) % 34) - 34; off < H; off += 34) {
-        const y = y0 + Math.max(0, off), y2 = Math.min(y0 + H, y0 + off + len);
-        if (y2 > y) g.lineStyle(k % 2 ? 1.6 : 2.4, 0xffffff, k % 2 ? .45 : .7).beginPath().moveTo(x, y).lineTo(x, y2).strokePath();
-      }
+  /** One waterfall: its spring, stream, rocks, the falling sheet, the plunge and the mist. */
+  private buildFall(spec: (typeof FALLS)[number], index: number, add: <T extends Phaser.GameObjects.GameObject>(o: T) => T): void {
+    const seed = index * 17 + 3, H = CLIFF + 4;
+    const along = (t: number, w: number) => spec.face === "v" ? at(spec.at + w, V1 - spec.spring * (1 - t)) : at(U1 - spec.spring * (1 - t), spec.at + w);
+    const width = (t: number) => .27 + t * (spec.half - .27);
+    const bend = (t: number) => Math.sin(t * 4.2 + seed) * .09 * (1 - t);
+    const a = spec.face === "v" ? at(spec.at - spec.half, V1) : at(U1, spec.at - spec.half);
+    const b = spec.face === "v" ? at(spec.at + spec.half, V1) : at(U1, spec.at + spec.half);
+    const out = spec.face === "v" ? { x: -48, y: 24 } : { x: 48, y: 24 };
+    const pool = along(0, bend(0));
+    const f: Fall = {
+      back: add(this.scene.add.graphics().setDepth(GROUND_DEPTH + 6)),
+      front: add(this.scene.add.graphics().setDepth(GROUND_DEPTH + 6.4)),
+      a, b, out, H, seed, along, width, bend, pool,
+      arc: spec.face === "v" ? [Math.PI * .25, Math.PI * 1.25] : [-Math.PI * .25, Math.PI * .75],
+      parts: [],
+      view: new Phaser.Geom.Rectangle(Math.min(a.x, b.x, pool.x) - 180, Math.min(a.y, b.y, pool.y) - 70, Math.abs(b.x - a.x) + Math.abs(pool.x - a.x) + 360, Math.abs(pool.y - a.y) + H + 280),
+    };
+    // the bed: wet earth banks, deep water, a lighter channel down the middle, pebbles along the edges
+    const bed = add(this.scene.add.graphics().setDepth(GROUND_DEPTH + 4.6));
+    const strip = (k: number, extra: number) => {
+      const l: P[] = [], r: P[] = [];
+      for (let i = 0; i <= 16; i++) { const t = i / 16, w = width(t) * k + extra; l.push(along(t, bend(t) - w)); r.push(along(t, bend(t) + w)); }
+      return l.concat(r.reverse());
+    };
+    bed.fillStyle(0x6a553b, 1).fillPoints(strip(1, .12), true);
+    bed.fillStyle(0x7d6646, 1).fillPoints(strip(1, .06), true);
+    bed.fillStyle(0x2b7fbd, 1).fillPoints(strip(1, 0), true);
+    bed.fillStyle(0x3f97d2, 1).fillPoints(strip(.62, 0), true);
+    bed.fillStyle(0x5fb0e2, .8).fillPoints(strip(.25, 0), true);
+    for (let i = 0; i < 14; i++) {
+      const t = (i + hash(i, seed)) / 14, side = i % 2 ? 1 : -1, p = along(t, bend(t) + side * (width(t) + .07));
+      bed.fillStyle(i % 3 ? 0xa59c8c : 0x8b8276, 1).fillEllipse(p.x, p.y, 5 + hash(i, 2) * 4, 3, 8);
     }
-    // foam curling over the lip, and the churning pool at the foot
-    g.lineStyle(5, 0xffffff, .9).beginPath().moveTo(a.x, a.y + 2).lineTo(b.x, b.y + 2).strokePath();
-    const mx = (a.x + b.x) / 2, my = (a.y + b.y) / 2 + H, w = Math.abs(b.x - a.x) + 30, pulse = Math.sin(time / 180) * 3;
-    g.fillStyle(0xffffff, .85).fillEllipse(mx, my + 4, w + pulse * 2, 18 + pulse);
-    g.fillStyle(0xd8f0ff, .7).fillEllipse(mx - 10, my + 10, w * .6, 10).fillEllipse(mx + 14, my + 12, w * .45, 8);
+    // the spring's pool among its boulders
+    bed.fillStyle(0x6a553b, 1).fillEllipse(pool.x, pool.y + 2, 92, 44);
+    bed.fillStyle(0x2b7fbd, 1).fillEllipse(pool.x, pool.y, 78, 36);
+    bed.fillStyle(0x4aa3dc, 1).fillEllipse(pool.x - 4, pool.y - 2, 56, 24);
+    bed.fillStyle(0x8fd0f5, .7).fillEllipse(pool.x - 12, pool.y - 6, 26, 7);
+    // the wet, dark rock behind the falling water, with moss down its sides
+    const sheetAt = (s: number, d: number) => this.sheet(f, s, d);
+    const wet: P[] = [];
+    // (ragged at the edges and spreading lower down, where the spray wets more of the rock)
+    for (let k = 0; k <= 12; k++) { const t = k / 12; wet.push(sheetAt(-.07 - t * .13 - hash(k, seed) * .07, H * t)); }
+    for (let k = 12; k >= 0; k--) { const t = k / 12; wet.push(sheetAt(1.07 + t * .13 + hash(k, seed + 5) * .07, H * t)); }
+    bed.fillStyle(0x3d3832, .42).fillPoints(wet, true);
+    for (const side of [0, 1]) for (let k = 0; k < 7; k++) {
+      const t = (k + hash(k, side + seed)) / 7, p = sheetAt(side ? 1.08 + t * .1 : -.08 - t * .1, H * t);
+      bed.fillStyle(k % 2 ? 0x4f8a3a : 0x6aa64a, .7).fillEllipse(p.x + (hash(k, 3) - .5) * 6, p.y, 3 + hash(k, side) * 4, 4 + hash(side, k) * 5, 8);
+    }
+    // boulders: round the spring, framing the lip, ledges down the sides and wet stones at the foot
+    const rocks = add(this.scene.add.graphics().setDepth(GROUND_DEPTH + 6.2));
+    const rim = [[-.55, -.32, 13], [.5, -.36, 11], [-.66, .1, 9], [.66, .14, 10]] as const;
+    rim.forEach(([w, t, r], k) => { const p = along(Math.max(0, t), bend(0) + w * 1.25); boulder(rocks, p.x, p.y - (t < 0 ? 8 : 0), r, seed + k); });
+    for (const [s, r] of [[-.1, 13], [1.1, 14], [-.24, 8], [1.25, 9]] as const) { const p = sheetAt(s, 2); boulder(rocks, p.x, p.y, r, seed + s * 7); }
+    for (const [s, d, r] of [[-.07, 46, 7], [1.08, 64, 8], [-.09, 92, 6], [1.06, 104, 7]] as const) { const p = sheetAt(s, d); boulder(rocks, p.x, p.y, r, seed + d, true); }
+    for (const [s, r] of [[.12, 11], [.86, 12], [.5, 8]] as const) { const p = sheetAt(s, H + 4); boulder(rocks, p.x, p.y, r, seed + s * 13, true); }
+    f.parts.push(f.back, f.front, bed, rocks);
+    this.falls.push(f);
+    this.drawFall(f, 0);
+    // spray and mist off the foot, and a faint rainbow in the mist
+    const L = sheetAt(-.05, H), R = sheetAt(1.05, H), foot = sheetAt(.5, H);
+    if (!this.still) {
+      const line = new Phaser.Geom.Line(L.x - foot.x, L.y - foot.y, R.x - foot.x, R.y - foot.y);
+      const zone = { type: "random" as const, source: line as unknown as Phaser.Types.GameObjects.Particles.RandomZoneSource };
+      f.parts.push(add(this.scene.add.particles(foot.x, foot.y, "savepal:spark", {
+        emitZone: zone, speed: { min: 40, max: 120 }, angle: { min: 232, max: 308 }, gravityY: 240, lifespan: 950,
+        scale: { start: .24, end: .04 }, alpha: { start: .95, end: 0 }, tint: [0xffffff, 0xd8f0ff, 0xa9dcf7], quantity: 2, frequency: 40,
+      }).setDepth(GROUND_DEPTH + 6.6)));
+      f.parts.push(add(this.scene.add.particles(foot.x, foot.y - 6, "savepal:puff", {
+        emitZone: zone, speedY: { min: -30, max: -10 }, speedX: { min: -12, max: 12 }, lifespan: 2800,
+        scale: { start: .35, end: 1.3 }, alpha: { start: .32, end: 0 }, tint: 0xf1f9ff, quantity: 1, frequency: 110,
+      }).setDepth(GROUND_DEPTH + 6.8)));
+    }
+    const bow = add(this.scene.add.graphics().setDepth(GROUND_DEPTH + 6.7));
+    // out over the plunge pool, in front of the cliff
+    const bx = foot.x + out.x / Math.hypot(out.x, out.y) * 46, by = foot.y + out.y / Math.hypot(out.x, out.y) * 46 + 6;
+    [0xff5a5a, 0xffa94a, 0xffe25a, 0x6fdc7a, 0x5aa8ff, 0x9a7aff].forEach((c, k) => bow.lineStyle(2.2, c, .2).beginPath().arc(bx, by, 44 - k * 2.2, Math.PI * 1.1, Math.PI * 1.9).strokePath());
+    if (!this.still) this.scene.tweens.add({ targets: bow, alpha: .45, duration: 3600, yoyo: true, repeat: -1, ease: "Sine.easeInOut" });
+    this.rainbows.push(bow);
   }
 
+  /** A point on the falling sheet: across it (s, 0..1 from a to b) and d pixels down from the lip.
+   *  The water bows outward from the rock and spreads a little as it falls. */
+  private sheet(f: Fall, s: number, d: number): P {
+    const k = Math.max(0, Math.min(1, d / f.H)), bulge = .24 * (1 - (1 - k) * (1 - k)), spread = .08 * k;
+    const ss = -spread + s * (1 + 2 * spread);
+    return { x: f.a.x + (f.b.x - f.a.x) * ss + f.out.x * bulge, y: f.a.y + (f.b.y - f.a.y) * ss + d + f.out.y * bulge };
+  }
+
+  /** The moving water: the stream racing to the lip, the sheet and its streaks, and the plunge at the foot. */
+  private drawFall(f: Fall, time: number): void {
+    const g = f.back, fr = f.front, H = f.H, S = (s: number, d: number) => this.sheet(f, s, d);
+    g.clear(); fr.clear();
+    // the spring wells up in rings
+    for (let k = 0; k < 3; k++) { const ph = frac(time / 1700 + k / 3), r = 5 + ph * 26; g.lineStyle(1.2, 0xffffff, .55 * (1 - ph)).strokeEllipse(f.pool.x - 4, f.pool.y - 1, r * 2, r); }
+    // glints racing down the stream, quickening toward the edge
+    for (let k = 0; k < 12; k++) {
+      const t = Math.pow(frac(time * .00022 * (1 + (k % 3) * .35) + k / 12), 1.4), w = f.width(t) * (hash(k, f.seed) - .5) * 1.3;
+      const p = f.along(t, f.bend(t) + w);
+      g.fillStyle(0xeaf7ff, .8 * Math.min(1, t * 6)).fillEllipse(p.x, p.y, 6 + t * 9, 1.6 + t, 8);
+    }
+    // the sheet: deep blue, lightening and aerating toward the foot
+    const sheet: P[] = [];
+    for (let k = 0; k <= 10; k++) sheet.push(S(0, H * k / 10));
+    for (let k = 10; k >= 0; k--) sheet.push(S(1, H * k / 10));
+    g.fillStyle(0x2f86c4, .96).fillPoints(sheet, true);
+    for (let j = 0; j < 6; j++) {
+      const d0 = H * j / 6, d1 = H * (j + 1) / 6;
+      g.fillStyle(mixColor(0x4aa6e0, 0xe2f3fc, j / 5), .32 + j * .08).fillPoints([S(.03, d0), S(.97, d0), S(.97, d1), S(.03, d1)], true);
+    }
+    // strands: darker channels, then white water racing down, short at the lip and long below
+    const N = 22;
+    for (let i = 0; i < N; i++) {
+      const s = (i + .5 + Math.sin(i * 7.1) * .3) / N, speed = .00045 * (1 + .25 * Math.sin(i * 3.3 + f.seed)), edge = Math.min(1, s * 6, (1 - s) * 6);
+      if (i % 4 === 1) { const p0 = S(s, 4), p1 = S(s, H - 6); g.lineStyle(2.2, 0x2470ad, .32 * edge).lineBetween(p0.x, p0.y, p1.x, p1.y); }
+      for (let k = 0; k < 4; k++) {
+        const ph = frac(time * speed + k / 4 + i * .37), d = H * Math.pow(ph, 1.7), len = 5 + 34 * ph;
+        const p0 = S(s, d), p1 = S(s, Math.min(H, d + len));
+        g.lineStyle(i % 3 === 0 ? 2.3 : 1.4, (i + k) % 3 ? 0xffffff : 0xcdeefc, (.22 + .6 * ph) * edge).lineBetween(p0.x, p0.y, p1.x, p1.y);
+      }
+    }
+    // droplets peeling off both edges
+    for (const side of [0, 1]) for (let k = 0; k < 6; k++) {
+      const ph = frac(time * .0005 + k / 6 + side * .5), d = H * Math.pow(ph, 1.6), s = side ? 1.03 + .07 * ph : -.03 - .07 * ph, p = S(s, d);
+      g.fillStyle(0xffffff, .6 * (1 - ph * .5)).fillCircle(p.x + Math.sin(k + time * .01) * 1.5, p.y, 1.1 + ph * 1.3);
+    }
+    // the lip: the water swells pale as it tips over, with a wavering line of white
+    g.fillStyle(0x9fdcff, .75).fillPoints([S(0, 0), S(1, 0), S(1, 9), S(0, 9)], true);
+    const lip: P[] = [];
+    for (let k = 0; k <= 18; k++) { const s = -.02 + k / 18 * 1.04, p = S(s, 0); lip.push({ x: p.x, y: p.y - 1 + Math.sin(s * 15 + time * .007) * 1.1 }); }
+    g.lineStyle(4.6, 0xffffff, .95).strokePoints(lip, false);
+    g.lineStyle(2, 0xd6f0ff, .9).strokePoints(lip.map(p => ({ x: p.x, y: p.y + 4.5 })), false);
+    // the plunge: aerated water, ripple rings spreading out (only their halves in front of the cliff), drifting foam
+    const foot = S(.5, H), base0 = S(0, H), base1 = S(1, H), wBase = Math.hypot(base1.x - base0.x, base1.y - base0.y);
+    fr.fillStyle(0xd6eefa, .8).fillEllipse(foot.x, foot.y + 4, wBase * 1.7, 22);
+    for (let k = 0; k < 4; k++) {
+      const ph = frac(time / 2600 + k / 4), R = .35 + ph * 1.9, rx = R * 67.9, ry = R * 33.9;
+      fr.lineStyle(1.7, 0xffffff, .6 * (1 - ph)).beginPath();
+      for (let j = 0; j <= 18; j++) { const th = f.arc[0] + (f.arc[1] - f.arc[0]) * j / 18, x = foot.x + Math.cos(th) * rx, y = foot.y + 4 + Math.sin(th) * ry; if (j) fr.lineTo(x, y); else fr.moveTo(x, y); }
+      fr.strokePath();
+    }
+    const across = { x: (base1.x - base0.x) / wBase, y: (base1.y - base0.y) / wBase }, outLen = Math.hypot(f.out.x, f.out.y), ox = f.out.x / outLen, oy = f.out.y / outLen;
+    for (let k = 0; k < 6; k++) {
+      const ph = frac(time / 3400 + k / 6), dist = 20 + ph * 90, lat = (k - 2.5) * 16 * (1 + ph);
+      fr.fillStyle(0xffffff, .55 * (1 - ph)).fillEllipse(foot.x + ox * dist + across.x * lat, foot.y + 4 + oy * dist + across.y * lat, 12 * (1 - ph * .4), 3.6, 10);
+    }
+    for (let k = 0; k < 10; k++) {
+      const s = (k + .5) / 10, p = S(s, H), r = 7 + 5 * Math.sin(time * .006 + k * 1.7) + (k % 3) * 1.5;
+      fr.fillStyle(0xffffff, .92).fillCircle(p.x + Math.sin(time * .004 + k) * 2, p.y + 2 - Math.abs(Math.sin(time * .005 + k * 2.1)) * 5, r);
+    }
+    for (let k = 0; k < 6; k++) { const s = hash(k, f.seed + 1), p = S(s, H); fr.fillStyle(0xeaf6ff, .85).fillCircle(p.x + (k - 2.5) * 6, p.y - 8 - Math.abs(Math.sin(time * .007 + k)) * 9, 3 + (k % 2) * 2); }
+  }
+
+  /** Redraws the falling water each frame, while it is in view. */
   update(time: number): void {
-    if (this.still) return;
-    for (const f of this.falls) this.drawFall(f, time);
+    if (this.still || !this.falls.length) return;
+    const view = this.scene.cameras.main.worldView;
+    for (const f of this.falls) {
+      const seen = Phaser.Geom.Rectangle.Overlaps(view, f.view);
+      for (const o of f.parts) (o as unknown as Phaser.GameObjects.Components.Visible).setVisible(seen);
+      if (seen) this.drawFall(f, time);
+    }
+  }
+
+  /** At night the rainbow fades and the clouds dim. */
+  setNight(k: number): void {
+    for (const r of this.rainbows) r.setVisible(k < .5);
+    const tint = mixColor(0xffffff, 0x8890b8, k);
+    for (const o of this.objects) if ((o as Phaser.GameObjects.Image).getData?.("cloud")) (o as Phaser.GameObjects.Image).setTint(tint);
   }
 
   destroy(): void {
     for (const o of this.objects) { this.scene.tweens.killTweensOf(o); o.destroy(); }
-    this.objects = []; this.falls = []; this.built = false;
+    this.objects = []; this.falls = []; this.rainbows = []; this.built = false;
   }
 }
 
 export const ISLAND_BOUNDS = { U0, V0, U1, V1, CLIFF } as const;
-void Atelier;

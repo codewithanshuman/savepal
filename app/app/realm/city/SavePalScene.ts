@@ -19,12 +19,17 @@ import { Island, ISLAND_BOUNDS } from "./island";
 import { bakeCoins, COIN_TEXTURES } from "./coins";
 import { bakeAll, RES, type Asset } from "./textures/atelier";
 import { PALACE, PALACE_BUILDER, PALACE_FOUNTAIN } from "./textures/palace";
+import type { Atelier } from "./textures/atelier";
 import { TOWN, TOWN_BUILDERS } from "./textures/town";
 import { FARMS, FARM_BUILDERS } from "./textures/farms";
 import { TREASURY, TREASURY_BUILDER, TREASURY_FIRES } from "./textures/treasury";
+import { NIGHT_DEPTH, Nightfall, type Lit, type SkyMode } from "./night";
 import { bakeSky, type FlagColor } from "./textures/sky";
-import { bakeCarts } from "./textures/carts";
+import { bakeCarts, trotKey } from "./textures/carts";
 import { KingdomLife, PEOPLE, personKey, personUrl, structureDepth, type Person } from "./life";
+import { Effects, bakeFx } from "./rig";
+import { Townsfolk } from "./folk";
+import { bakeCritters } from "./textures/critters";
 import { WalkMode, type Entrance } from "./walk";
 
 // The kingdom's estates are plain ground for the terrain pass: no street or prop crosses them.
@@ -35,6 +40,9 @@ export type RealmPick = { place: RealmPlace } | { page: string } | { agreement: 
 export type RealmReward = { key: string; xp: number; place: RealmPlace };
 
 const ASSETS: Record<string, Asset> = { palace: PALACE, ...TOWN, ...FARMS };
+const BUILDERS: Partial<Record<string, (a: Atelier) => void>> = { palace: PALACE_BUILDER, ...TOWN_BUILDERS, ...FARM_BUILDERS };
+/** Structures with windows or lamps, which light up after dark. */
+const LIT = (kind: string) => kind === "palace" || kind in TOWN || kind === "barn" || kind === "windmill" || kind === "park";
 const capitol = capitolDistrict(CITY_SIZE);
 const at = (gx: number, gy: number, z = 0) => { const p = projection.project(gx, gy); return { x: p.x, y: p.y - z }; };
 const ROLE_PLACE: Partial<Record<Structure["role"], RealmPlace>> = { palace: "castle", guild: "guild", bazaar: "market", port: "harbour" };
@@ -49,6 +57,11 @@ export class SavePalScene extends WorldScene {
   private bubbles = new Map<string, Phaser.GameObjects.Container>();
   private plates: Phaser.GameObjects.Text[] = [];
   private life?: KingdomLife;
+  private folk?: Townsfolk;
+  private fx?: Effects;
+  private night?: Nightfall;
+  private skyMode: SkyMode = "auto";
+  private nightSeen = -1;
   private island?: Island;
   private walk?: WalkMode;
   private treasurySprite?: Phaser.GameObjects.Sprite;
@@ -106,21 +119,28 @@ export class SavePalScene extends WorldScene {
       const g = this.make.graphics({ x: 0, y: 0 }, false);
       g.fillStyle(0xffffff, 1).fillCircle(8, 8, 8).generateTexture("savepal:spark", 16, 16); g.destroy();
     }
-    this.life = new KingdomLife(this);
+    bakeFx(this);
+    bakeCritters(this);
+    this.fx = new Effects(this);
+    this.life = new KingdomLife(this, this.fx);
+    this.folk = new Townsfolk(this, this.fx);
+    this.night = new Nightfall(this);
+    this.night.setMode(this.skyMode);
     this.island = new Island(this);
     this.walk = new WalkMode(this, {
       blocked: (u, v) => u < ISLAND_BOUNDS.U0 + .35 || v < ISLAND_BOUNDS.V0 + .35 || u > ISLAND_BOUNDS.U1 - .35 || v > ISLAND_BOUNDS.V1 - .35 || blockedAt(this.structures, u, v),
       entrances: () => doorsFor(this.structures).map(d => ({ id: d.id, label: d.label, u: d.u, v: d.v })),
       onNear: (e) => this.nearHandler?.(e ? e.label : null),
+      occluders: () => [...[...this.buildingManager.getViews().values()].map(v => v.sprite), ...(this.treasurySprite ? [this.treasurySprite] : [])],
       depthBias: 2,
-    });
+    }, this.fx);
     this.input.keyboard?.on("keydown-E", () => this.enterNearest());
     this.input.keyboard?.on("keydown-ENTER", () => this.enterNearest());
     this.ready = true;
     this.events.once("shutdown", () => {
       this.ready = false;
-      this.walk?.stop(); this.life?.destroy(); this.island?.destroy();
-      this.life = undefined; this.island = undefined; this.walk = undefined;
+      this.walk?.stop(); this.life?.destroy(); this.folk?.destroy(); this.island?.destroy(); this.fx?.destroy(); this.night?.destroy();
+      this.life = undefined; this.folk = undefined; this.island = undefined; this.walk = undefined; this.fx = undefined; this.night = undefined;
       this.bubbles.clear(); this.plates = []; this.effectsBuilt = false;
     });
     if (this.pending) { const p = this.pending; this.pending = undefined; this.setRealm(p); }
@@ -142,6 +162,8 @@ export class SavePalScene extends WorldScene {
     const port = structures.find(s => s.role === "port");
     this.island?.build((gx, gy) => !!port && gx > CITY_SIZE.width - 1 && Math.abs(gy - port.y) < 1.6);
     this.life?.build(structures);
+    this.folk?.build(structures, this.terrainManager.terrain);
+    this.lightUp(structures);
     const mainFlag: FlagColor = input.current.paid ? "gold" : input.current.held ? "paypal" : "royal";
     this.life?.setState({ held: input.current.held, paid: input.current.paid, working: input.stage === 2, appealOpen: input.appealOpen, bounties: input.bounties, inspecting: input.inspecting, banner: input.banner, mainFlag });
     this.buildEffects();
@@ -149,11 +171,32 @@ export class SavePalScene extends WorldScene {
     this.playIntro();
   }
 
+  /** Day, night, or the viewer's own clock. */
+  setSky(mode: SkyMode): void { this.skyMode = mode; this.night?.setMode(mode); }
+
+  /** What lights up after dark: every structure's windows and lamps, lanterns, fireflies, the lighthouse. */
+  private lightUp(structures: Structure[]): void {
+    const night = this.night;
+    if (!night) return;
+    const lit: Lit[] = [];
+    for (const s of structures) {
+      const view = this.buildingManager.getViews().get(s.path), asset = ASSETS[s.kind], builder = BUILDERS[s.kind];
+      if (view && asset && builder && LIT(s.kind)) lit.push({ sprite: view.sprite, asset, builder, u: s.x, v: s.y });
+    }
+    if (this.treasurySprite) lit.push({ sprite: this.treasurySprite, asset: TREASURY, builder: TREASURY_BUILDER, u: capitol.centerX, v: (capitol.minY + capitol.maxY) / 2 });
+    night.setLit(lit);
+    night.setLanterns((this.folk?.people ?? []).filter((_, i) => i % 2 === 0));
+    const gardens = structures.filter(s => ["park", "orchard", "strawberries", "blueberries", "vineyard"].includes(s.kind)).map(s => ({ u0: s.x - 2, v0: s.y - 2, u1: s.x + 2, v1: s.y + 2 }));
+    night.setGardens(gardens);
+    const port = structures.find(s => s.role === "port");
+    night.setLighthouse(port ? { u: port.x + 10.8, v: port.y + 3.0, z: -13 } : null);
+  }
+
   setRewards(rewards: RealmReward[]): void { this.rewards = rewards; if (this.ready && this.structures.length) this.layoutBubbles(); }
 
   /** Money moved: fireworks over the palace and the treasury, and the banner plane flies the news. */
   celebrate(): void {
-    this.life?.celebrate();
+    this.life?.celebrate(); this.folk?.cheer(); this.walk?.cheer();
     if (this.still) return;
     // bursts sized to the current zoom, so they read as fireworks whether close in or far out
     const k = Phaser.Math.Clamp(.5 * this.dpr / (this.cameras.main.zoom || 1), 1, 5);
@@ -163,7 +206,7 @@ export class SavePalScene extends WorldScene {
       const burst = this.add.particles(p.x, p.y, "savepal:spark", {
         speed: { min: 160 * k, max: 340 * k }, gravityY: 90 * k, lifespan: 1600, scale: { start: .7 * k, end: 0 }, alpha: { start: 1, end: 0 },
         tint: [[0xffd35c, 0xffe48a], [0xff7aa2, 0xffc2d4], [0x8fd0ff, 0xd8f0ff], [0x7fe3a4, 0xd2f7e2]][i % 4]!, blendMode: "ADD", emitting: false,
-      }).setDepth(SKY_DEPTH + 20);
+      }).setDepth(SKY_DEPTH + 45);
       burst.explode(70);
       this.time.delayedCall(2000, () => burst.destroy());
     }));
@@ -180,7 +223,7 @@ export class SavePalScene extends WorldScene {
   startWalk(person: Person): void {
     if (!this.walk) return;
     this.cameraController.zoomTarget = 1.15 * this.dpr;
-    this.walk.start(personKey(person), capitol.centerX, capitol.maxY + 2.4, 1.15 * this.dpr);
+    this.walk.start(person, capitol.centerX, capitol.maxY + 2.4, 1.15 * this.dpr);
   }
   stopWalk(): void { if (!this.walk?.active) return; this.walk.stop(); this.fitCamera(true); }
   setWalkPad(x: number, y: number): void { this.walk?.setPad(x, y); }
@@ -232,8 +275,32 @@ export class SavePalScene extends WorldScene {
       const slot = b.getData("slot") as number, side = slot === 0 ? 0 : (slot % 2 ? 1 : -1) * Math.ceil(slot / 2);
       b.setScale(kb).setPosition(b.getData("ax") + side * 136 * kb, b.getData("ay") + Math.sin(time / 420 + slot) * 7 * kb);
     }
+    this.life?.update(delta);
+    this.folk?.update(delta, time);
+    this.animateTraffic(time);
+    if (this.night) {
+      this.night.update(time, delta);
+      const k = this.night.k;
+      if (this.folk) this.folk.night = k;
+      if (Math.abs(k - this.nightSeen) > .02) { this.nightSeen = k; this.island?.setNight(k); }
+    }
     this.walk?.update(delta);
     this.island?.update(time);
+  }
+
+  /** The engine's carts: shown at our bake resolution, the horses trotting as they roll. */
+  private animateTraffic(time: number): void {
+    const traffic = (this as unknown as { ambient?: { traffic?: Phaser.GameObjects.Container } }).ambient?.traffic;
+    if (!traffic) return;
+    const k = 1 / RES;
+    traffic.list.forEach((o, i) => {
+      const cart = o as Phaser.GameObjects.Sprite;
+      if (cart.scaleX !== k) cart.setScale(k);
+      if (this.still) return;
+      const key = cart.texture.key, base = key.endsWith(":trot") ? key.slice(0, -5) : key;
+      const want = Math.floor(time / 150 + i * .5) % 2 ? trotKey(base) : base;
+      if (want !== key && this.textures.exists(want)) cart.setTexture(want);
+    });
   }
 
   /** The archive's own scenery gives way to SavePal's: the capitol becomes the treasury; its props, clouds and ships hide. */
@@ -296,7 +363,7 @@ export class SavePalScene extends WorldScene {
       const p = at((capitol.minX + capitol.maxX) / 2 + u, (capitol.minY + capitol.maxY) / 2 + v, z + 4);
       this.add.particles(p.x, p.y, "savepal:spark", {
         speedY: { min: -70, max: -36 }, speedX: { min: -10, max: 10 }, lifespan: 650, scale: { start: .42, end: 0 }, alpha: { start: 1, end: 0 }, tint: [0xffd36a, 0xff8a2a, 0xff5a1a], blendMode: "ADD", quantity: 1, frequency: 50,
-      }).setDepth(SKY_DEPTH - 30);
+      }).setDepth(NIGHT_DEPTH + 2);
     }
   }
 
@@ -318,7 +385,7 @@ export class SavePalScene extends WorldScene {
     const t = this.add.text(x, y, text, {
       fontFamily: "Silkscreen, monospace", fontSize: small ? "24px" : "32px", color: small ? "#ffffff" : "#ffd15c",
       backgroundColor: small ? "rgba(27,35,51,0.82)" : "rgba(14,22,36,0.92)", padding: { x: small ? 10 : 14, y: small ? 4 : 6 },
-    }).setOrigin(.5, 0).setResolution(3).setDepth(SKY_DEPTH - 40);
+    }).setOrigin(.5, 0).setResolution(3).setDepth(SKY_DEPTH + 40);
     t.setData("small", small);
     return t;
   }
@@ -360,7 +427,7 @@ export class SavePalScene extends WorldScene {
       card.fillStyle(0xfffaf0, 1).fillTriangle(-10, 24, 10, 24, 0, 40).lineStyle(4, 0x1b2333, 1).beginPath().moveTo(-10, 26).lineTo(0, 40).lineTo(10, 26).strokePath();
       const coin = this.add.image(-30, -4, COIN_TEXTURES.coin).setScale(.48);
       const label = this.add.text(-6, -4, `+${r.xp}`, { fontFamily: "Silkscreen, monospace", fontSize: "24px", color: "#1b2333" }).setOrigin(0, .5).setResolution(3);
-      const bubble = this.add.container(a.x, a.y, [card, coin, label]).setDepth(SKY_DEPTH - 10).setSize(124, 76).setInteractive({ useHandCursor: true });
+      const bubble = this.add.container(a.x, a.y, [card, coin, label]).setDepth(SKY_DEPTH + 50).setSize(124, 76).setInteractive({ useHandCursor: true });
       bubble.setData({ ax: a.x, ay: a.y, slot: i });
       bubble.on("pointerup", (pointer: Phaser.Input.Pointer) => {
         if (pointer.getDistance() > 8 || !this.bubbles.has(r.key)) return;

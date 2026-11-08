@@ -57,6 +57,10 @@ export type Asset = { key: string; width: number; height: number; anchorY: numbe
  */
 export const RES = typeof window !== "undefined" && window.innerWidth < 900 ? 1.15 : 1.5;
 
+/** Every lamp each structure's builder set up, keyed by texture: (u, v, height). The night lights them. */
+export const LAMPS: Record<string, Array<[number, number, number]>> = {};
+let lampLog: Array<[number, number, number]> | null = null;
+
 export class Atelier {
   constructor(readonly baker: Baker, readonly x: number, readonly y: number) {}
   at(p: Point3) { return this.baker.at(p, this.x, this.y); }
@@ -268,6 +272,7 @@ export class Atelier {
   }
   /** A lamp post with a warm lantern. */
   lamp(u: number, v: number, h = 30): void {
+    lampLog?.push([u, v, h]);
     this.line(0x3a3328, [[u, v, 0], [u, v, h]], 2);
     this.box({ u0: u - .05, u1: u + .05, v0: v - .05, v1: v + .05, z0: h, z1: h + 7 }, mat(0x5a4a32, GLOW, 0xd9a64a));
   }
@@ -313,9 +318,44 @@ export function bakeAll<K extends string>(scene: Scene, assets: Record<K, Asset>
   for (const name of Object.keys(assets) as K[]) {
     const asset = assets[name];
     if (scene.textures.exists(asset.key)) continue;
+    lampLog = LAMPS[asset.key] = [];
     builders[name](new Atelier(baker, asset.originX ?? asset.width / 2, asset.height - asset.anchorY));
+    lampLog = null;
     baker.finish(asset.key, Math.ceil(asset.width * RES), Math.ceil(asset.height * RES));
     scene.textures.get(asset.key).setFilter(1 /* LINEAR */);
   }
+  baker.destroy();
+}
+
+/** The night's light map of a structure: its texture key with this suffix. */
+export const LIGHTS = ":lights";
+/** Light maps are soft, so they bake at half the day's resolution. */
+export const LIGHT_RES = RES * .5;
+
+/**
+ * Bakes one structure's light map by running its own builder again with every colour remapped:
+ * window glass glows warm (some rooms left dark), lit windows and lanterns glow brighter, fires
+ * keep their colour, and everything else paints black -- so a wall drawn in front of a window
+ * still hides it. Shown with additive blending over the night, black adds nothing.
+ */
+export function bakeLights(scene: Scene, asset: Asset, builder: (a: Atelier) => void): void {
+  const key = asset.key + LIGHTS;
+  if (scene.textures.exists(key)) return;
+  const baker = createBaker(scene), g = baker.graphics;
+  g.setScale(LIGHT_RES);
+  const fill = g.fillStyle.bind(g), stroke = g.lineStyle.bind(g);
+  let rooms = 0;
+  const light = (c: number) => {
+    if (c === GLASS) { rooms++; return rooms % 7 === 3 || rooms % 5 === 1 ? 0x000000 : 0xffa94d; }
+    if (c === GLOW) return 0xffd27a;
+    if (c === 0xd9a64a) return 0xffc060;
+    if (c === 0xffd36a || c === 0xff9a3c || c === 0xff8a2a) return c;
+    return 0x000000;
+  };
+  g.fillStyle = ((color: number, alpha?: number) => fill(light(color), alpha)) as typeof g.fillStyle;
+  g.lineStyle = ((width: number, color: number, alpha?: number) => stroke(width, light(color), alpha)) as typeof g.lineStyle;
+  builder(new Atelier(baker, asset.originX ?? asset.width / 2, asset.height - asset.anchorY));
+  baker.finish(key, Math.ceil(asset.width * LIGHT_RES), Math.ceil(asset.height * LIGHT_RES));
+  scene.textures.get(key).setFilter(1 /* LINEAR */);
   baker.destroy();
 }
