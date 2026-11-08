@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import PayPalCheckout from "../../paypal-checkout";
 import { setSfxEnabled, sfx, sfxEnabled } from "./sfx";
 import { UNLOCKS, housesBuilt, isPaid, levelFor, rewards } from "./progress";
@@ -9,6 +9,25 @@ import type { SkyMode } from "./city/night";
 import { MAX_HOMES, type RealmInput } from "./city/layout";
 import type { RealmPick, RealmPlace } from "./city/SavePalScene";
 import { coinIconUrl, coinPileUrl } from "./city/coins";
+
+/** The viewer's sky choice, kept in this browser (in memory too, should storage be unavailable).
+ *  Read through useSyncExternalStore, so the server render and the first client render agree. */
+const SKY_KEY = "savepal:sky";
+let skyChoice: SkyMode | null = null;
+const skyListeners = new Set<() => void>();
+function readSky(): SkyMode {
+  if (skyChoice) return skyChoice;
+  try { const m = localStorage.getItem(SKY_KEY); return m === "day" || m === "night" ? m : "auto"; } catch { return "auto"; }
+}
+function writeSky(mode: SkyMode): void {
+  skyChoice = mode;
+  try { localStorage.setItem(SKY_KEY, mode); } catch { /* storage unavailable: the choice lasts this visit */ }
+  skyListeners.forEach(fn => fn());
+}
+function subscribeSky(fn: () => void): () => void {
+  skyListeners.add(fn);
+  return () => { skyListeners.delete(fn); };
+}
 
 type Landmark = RealmPlace;
 type Verdict = "VERIFIED" | "FAILED" | "INCONCLUSIVE";
@@ -121,13 +140,8 @@ export default function Realm({ id }: { id: string }) {
   useEffect(() => { setSound(sfxEnabled()); }, []);
   const toggleSound = () => { const on = !sound; setSfxEnabled(on); setSound(on); if (on) sfx.click(); };
   // the kingdom keeps the viewer's clock by default; the sky button holds it at day or night instead
-  const [sky, setSky] = useState<SkyMode>("auto");
-  useEffect(() => { try { const m = localStorage.getItem("savepal:sky"); if (m === "day" || m === "night") setSky(m); } catch { /* storage unavailable */ } }, []);
-  const cycleSky = () => {
-    const next: SkyMode = sky === "auto" ? "day" : sky === "day" ? "night" : "auto";
-    sfx.click(); setSky(next);
-    try { localStorage.setItem("savepal:sky", next); } catch { /* storage unavailable */ }
-  };
+  const sky = useSyncExternalStore(subscribeSky, readSky, () => "auto" as SkyMode);
+  const cycleSky = () => { sfx.click(); writeSky(sky === "auto" ? "day" : sky === "day" ? "night" : "auto"); };
   /** Opening a building plays its door; closing plays it backwards. */
   const enter = (l: Landmark | null) => { if (l) { sfx.open(); realm.current?.focus(l); } setCourt(l); setPicked(null); };
   const leave = () => { sfx.close(); setCourt(null); };
