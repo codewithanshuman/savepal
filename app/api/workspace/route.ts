@@ -477,6 +477,18 @@ export async function POST(request: Request) {
     if (intact) return fail(intact, 409);
     try {
       const client = paypal();
+      // An unapproved order the current PayPal app can't see (the app or merchant was switched) is
+      // dropped, and the recipient rebinds to the configured merchant. Nothing was held, so no money moves.
+      if (p.funding_status === "ORDER_CREATED" && p.paypal_order_id && !p.paypal_authorization_id && !p.paypal_capture_id && !cfg.PAYPAL_PARTNER_MERCHANT_ID) {
+        const stale = await client.getOrder(p.paypal_order_id).then(() => false, (e: unknown) => e instanceof Error && /HTTP 404$/.test(e.message));
+        if (stale) {
+          const reset = await db().prepare("UPDATE projects SET paypal_order_id=NULL,payment_recipient_merchant_id=NULL,updated_at=? WHERE id=? AND paypal_order_id=? AND funding_status='ORDER_CREATED' AND paypal_authorization_id IS NULL AND paypal_capture_id IS NULL")
+            .bind(now(),id,p.paypal_order_id).run();
+          if (!reset.meta.changes) return fail("Funding state changed; refresh and try again", 409);
+          await event(id,user.email,"PAYPAL_ORDER_EXPIRED",`Sandbox order ${p.paypal_order_id} is no longer available at PayPal; a fresh order will be opened.`);
+          p.paypal_order_id = null; p.payment_recipient_merchant_id = null;
+        }
+      }
       const expected = paymentExpectation(p,p.funding_custom_id || "","AUTHORIZE");
       if (cfg.PAYPAL_PARTNER_MERCHANT_ID && cfg.PAYPAL_CLIENT_ID)
         await requireReadySeller(db(),p,client,cfg.PAYPAL_PARTNER_MERCHANT_ID,cfg.PAYPAL_CLIENT_ID);
