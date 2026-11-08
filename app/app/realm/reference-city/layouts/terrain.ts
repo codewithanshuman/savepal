@@ -421,7 +421,8 @@ function classify(
   // The dock road is only ever consulted outside the field, below the city
   // branch above: it runs from the city edge out to the two aprons and must
   // never be in a position to pave over a plot.
-  if (ports.has(x, y)) {
+  // SavePal's island has no airport or harbour aprons to reach, so no dock road leaves the city.
+  if (!coast.square && ports.has(x, y)) {
     // A working road, not a back lane and not a boulevard.
     return { x, y, kind: "road", variant: 0, roadMask: 0, roadClass: "street" };
   }

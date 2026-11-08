@@ -115,7 +115,8 @@ export class KingdomLife {
         this.timers.push(this.scene.time.addEvent({ delay: 700, loop: true, callback: () => this.puff(p.x, p.y, d + 4) }));
       }
       if (s.kind === "strawberries" || s.kind === "blueberries") { const g = add(this.person("gardener", s.x - .6, s.y + .4, 0, true)); this.busy(g, 700); }
-      if (s.kind === "bazaar") { const c = add(this.person("chef", s.x + .95, s.y + 1.05)); this.busy(c, 900); }
+      // the chef stands on open paving in front of the fountain, between the two stall rows
+      if (s.kind === "bazaar") { const c = add(this.person("chef", s.x + .05, s.y + 1.8)); this.busy(c, 900); }
       if (s.kind === "barn") add(this.person("miner", s.x + 1.6, s.y + .5, 0, true));
     }
     if (!this.still) for (const w of WALKS) add(this.walker(w.who, w.from, w.to, w.ms));
@@ -236,7 +237,8 @@ export class KingdomLife {
     const W = CITY_SIZE.width, H = CITY_SIZE.height;
     const routes: Array<{ from: [number, number]; to: [number, number]; flip: boolean; ms: number }> = [
       { from: [-8, H + 6.5], to: [W + 8, H + 6.5], flip: false, ms: 150000 },
-      { from: [W + 6.5, -8], to: [W + 6.5, H + 10], flip: true, ms: 130000 },
+      // the eastern lane runs well outside the port's dock and lighthouse
+      { from: [W + 13, -8], to: [W + 13, H + 12], flip: true, ms: 130000 },
       { from: [-16, H + 13], to: [W + 14, H + 13], flip: false, ms: 190000 },
     ];
     routes.forEach((r, i) => {

@@ -72,12 +72,15 @@ export const ROAD_WIDTHS: Record<RoadClass, { road: number; kerb: number }> = {
 };
 
 export const ATLAS_COLUMNS = 8;
+/** SavePal: the ground atlas is baked at twice the tile size and drawn at half, so it stays crisp in HD. */
+export const ATLAS_RES = 2;
 
 
 export function bakeTerrainAtlas(scene: Phaser.Scene, baker: Baker): void {
   const slots: Array<{ name: string; x: number; y: number }> = [];
   let index = 0;
 
+  baker.graphics.setScale(ATLAS_RES);
   const place = (name: string, draw: (x: number, y: number) => void): void => {
     const x = (index % ATLAS_COLUMNS) * TILE_WIDTH;
     const y = Math.floor(index / ATLAS_COLUMNS) * TILE_HEIGHT;
@@ -129,11 +132,13 @@ export function bakeTerrainAtlas(scene: Phaser.Scene, baker: Baker): void {
   }
 
   const rows = Math.ceil(index / ATLAS_COLUMNS);
-  baker.flush(TERRAIN_ATLAS_KEY, ATLAS_COLUMNS * TILE_WIDTH, rows * TILE_HEIGHT);
+  baker.flush(TERRAIN_ATLAS_KEY, ATLAS_COLUMNS * TILE_WIDTH * ATLAS_RES, rows * TILE_HEIGHT * ATLAS_RES);
+  baker.graphics.setScale(1);
 
   const texture = scene.textures.get(TERRAIN_ATLAS_KEY);
+  // frames inset by a hair so neighbouring tiles never bleed into each other under smooth filtering
   for (const slot of slots) {
-    texture.add(slot.name, 0, slot.x, slot.y, TILE_WIDTH, TILE_HEIGHT);
+    texture.add(slot.name, 0, slot.x * ATLAS_RES + 1, slot.y * ATLAS_RES + 1, TILE_WIDTH * ATLAS_RES - 2, TILE_HEIGHT * ATLAS_RES - 2);
   }
 }
 

@@ -7,14 +7,16 @@
  */
 import { Atelier, GLASS, GLOW, GOLD, M, ROOF, mat, shade, type Asset, type Box } from "./atelier";
 
-export const PALACE: Asset = { key: "savepal:palace", width: 1700, height: 1120, anchorY: 440 };
+export const PALACE: Asset = { key: "savepal:palace", width: 1700, height: 1190, anchorY: 440 };
 /** Half-extents of the estate, in tiles, around its centre. */
 export const PALACE_HALF = { u: 11.5, v: 5.5 } as const;
 
 const WU = 10.3, WV = 4.3, WALL_H = 80, CORNER_R = .95, CORNER_H = 175, GATE_R = .72, GATE_H = 160;
 const SPIRE = { u: 0, v: -2.75, z: 320, r: 1.15, rise: 150 } as const;
 const BELL = { u: -4.95, v: 2.55, h: 150 } as const;
-const towerTop = (r: number, h: number) => h + 6 + r * 95 + 10;
+/** Towers wear tall, tiled cones; the flags fly from their finials. */
+const CONE = 125;
+const towerTop = (r: number, h: number) => h + 6 + (r + .14) * CONE + 10;
 /** Pole tops for the animated flags, in estate tiles and pixels up. */
 export const PALACE_FLAGS: ReadonlyArray<{ u: number; v: number; z: number; main?: boolean }> = [
   { u: SPIRE.u, v: SPIRE.v, z: SPIRE.z + 6 + SPIRE.rise + 10, main: true },
@@ -49,9 +51,14 @@ function squareTower(a: Atelier, u: number, v: number, half: number, h: number):
 function wall(a: Atelier, b: Box, banners: number[] = []): void {
   a.box(b, M.granite);
   const front = b.u1 - b.u0 > b.v1 - b.v0;
-  for (let z = 12; z < WALL_H - 16; z += 14) {
-    if (front) a.line(shade(M.granite.frontLeft, -9), [[b.u0, b.v1, z], [b.u1, b.v1, z]], .6, .45);
-    else a.line(shade(M.granite.frontRight, -9), [[b.u1, b.v0, z], [b.u1, b.v1, z]], .6, .45);
+  for (let z = 12, row = 0; z < WALL_H - 16; z += 14, row++) {
+    if (front) {
+      a.line(shade(M.granite.frontLeft, -9), [[b.u0, b.v1, z], [b.u1, b.v1, z]], .6, .45);
+      for (let u = b.u0 + (row % 2 ? .25 : .5); u < b.u1; u += .5) a.line(shade(M.granite.frontLeft, -9), [[u, b.v1 + .002, z], [u, b.v1 + .002, z + 14]], .5, .35);
+    } else {
+      a.line(shade(M.granite.frontRight, -9), [[b.u1, b.v0, z], [b.u1, b.v1, z]], .6, .45);
+      for (let v = b.v0 + (row % 2 ? .25 : .5); v < b.v1; v += .5) a.line(shade(M.granite.frontRight, -9), [[b.u1 + .002, v, z], [b.u1 + .002, v, z + 14]], .5, .35);
+    }
   }
   if (front) for (let u = b.u0 + .55; u < b.u1 - .3; u += 1.05) a.face(GLASS, [[u - .025, b.v1 + .003, 44], [u + .025, b.v1 + .003, 44], [u + .025, b.v1 + .003, 58], [u - .025, b.v1 + .003, 58]]);
   else for (let v = b.v0 + .55; v < b.v1 - .3; v += 1.05) a.face(GLASS, [[b.u1 + .003, v - .025, 44], [b.u1 + .003, v + .025, 44], [b.u1 + .003, v + .025, 58], [b.u1 + .003, v - .025, 58]]);
@@ -66,7 +73,7 @@ function wing(a: Atelier, b: Box, turret: [number, number]): void {
   a.storeys(b, 3, Math.round((b.u1 - b.u0) * 1.7), Math.round((b.v1 - b.v0) * 1.7), M.limestone, true);
   a.cornice(b, .08, 6);
   a.merlons({ ...b, z1: b.z1 + 6 }, M.limestone, .1, 5);
-  a.hip({ ...b, z1: b.z1 + 6 }, 50, ROOF.slate);
+  a.hip({ ...b, z1: b.z1 + 6 }, 50, ROOF.slate, GOLD);
   for (let u = b.u0 + .7; u < b.u1 - .4; u += 1.3) a.box({ u0: u, u1: u + .3, v0: (b.v0 + b.v1) / 2 + .2, v1: (b.v0 + b.v1) / 2 + .5, z0: b.z1 + 6, z1: b.z1 + 34 }, M.limestone);
   a.cylinder(turret[0], turret[1], .42, 0, b.z1 + 30, M.limestone.frontLeft, M.limestone.top);
   for (let z = 40; z < b.z1 + 20; z += 32) a.face(GLOW, [[turret[0] - .04, turret[1] + .42, z], [turret[0] + .04, turret[1] + .42, z], [turret[0] + .04, turret[1] + .42, z + 15], [turret[0] - .04, turret[1] + .42, z + 15]]);
@@ -80,6 +87,17 @@ function keep(a: Atelier): void {
   a.storeys(b, 5, 11, 4, M.limestone, true);
   a.cornice(b, .09, 7);
   a.merlons(b, M.limestone, .12, 8);
+  // two balconies across the keep's face, with gold rails, and long heraldic banners
+  for (const z of [76, 114]) {
+    a.box({ u0: -2.7, u1: 2.7, v0: b.v1, v1: b.v1 + .28, z0: z - 5, z1: z }, M.limestone);
+    a.line(GOLD, [[-2.7, b.v1 + .28, z + 9], [2.7, b.v1 + .28, z + 9]], 1.6);
+    for (let u = -2.6; u <= 2.65; u += .26) a.line(0xe8d9b4, [[u, b.v1 + .28, z], [u, b.v1 + .28, z + 9]], 1);
+  }
+  for (const [u, c] of [[-3.25, ROOF.royal[0]], [3.25, CRIMSON]] as const) {
+    a.face(c, [[u - .3, b.v1 + .004, 184], [u + .3, b.v1 + .004, 184], [u + .3, b.v1 + .004, 112], [u, b.v1 + .004, 100], [u - .3, b.v1 + .004, 112]]);
+    a.face(GOLD, [[u - .3, b.v1 + .005, 184], [u + .3, b.v1 + .005, 184], [u + .3, b.v1 + .005, 179], [u - .3, b.v1 + .005, 179]]);
+    const em = a.at([u, b.v1 + .006, 150]); a.g.fillStyle(GOLD, 1).fillCircle(em.x, em.y, 7).fillStyle(0xfff3b0, 1).fillCircle(em.x - 2, em.y - 2, 2);
+  }
   // the great tower, its clock and the spire
   const t: Box = { u0: -1.1, u1: 1.1, v0: -3.45, v1: -2.05, z0: 190, z1: SPIRE.z };
   a.box(t, M.limestone);
@@ -184,19 +202,19 @@ function grounds(a: Atelier): void {
   for (const [u, v] of [[-8, WV + .58], [4, WV + .55], [WU + .58, -2], [WU + .6, 2.4], [-4.5, WV + .6], [8.5, WV + .55]] as const) { const p = a.at([u, v, .5]); a.g.fillStyle(0xd8f0ff, .7).fillRect(p.x - 6, p.y, 11, 1.2); }
   for (let u = -10.6; u <= 10.7; u += 2.65) if (Math.abs(u) > 1.6) a.tree(u, hv - .2, .85, 0x3f8f3c);
   a.pad(-(WU - .17), -(WV - .17), WU - .17, WV - .17, M.paving.top, .8);
-  for (let u = -WU + .5; u < WU; u += .5) a.line(shade(M.paving.top, -7), [[u, -WV + .2, .9], [u, WV - .2, .9]], .5, .55);
+  for (let u = -WU + .2; u < WU - .2; u += .6) for (let v = -WV + .2; v < WV - .2; v += .6) if ((Math.round(u / .6) + Math.round(v / .6)) % 2) a.pad(u, v, Math.min(u + .6, WU - .17), Math.min(v + .6, WV - .17), shade(M.paving.top, -6), .85);
   a.pad(-.85, -1.5, .85, WV - .17, M.cobble.top, 1);
 }
 
 function palace(a: Atelier): void {
   grounds(a);
-  a.tower(-WU, -WV, CORNER_R, CORNER_H, M.granite, ROOF.royal);
+  a.tower(-WU, -WV, CORNER_R, CORNER_H, M.granite, ROOF.royal, (CORNER_R + .14) * CONE);
   wall(a, { u0: -WU, u1: WU, v0: -WV - .17, v1: -WV + .17, z0: 0, z1: WALL_H });
   wall(a, { u0: -WU - .17, u1: -WU + .17, v0: -WV, v1: WV, z0: 0, z1: WALL_H });
   for (const u of [-6.9, -3.45, 3.45, 6.9]) squareTower(a, u, -WV, .6, 124);
   squareTower(a, -WU, 0, .6, 124);
-  a.tower(-WU, WV, CORNER_R, CORNER_H, M.granite, ROOF.royal);
-  a.tower(WU, -WV, CORNER_R, CORNER_H, M.granite, ROOF.royal);
+  a.tower(-WU, WV, CORNER_R, CORNER_H, M.granite, ROOF.royal, (CORNER_R + .14) * CONE);
+  a.tower(WU, -WV, CORNER_R, CORNER_H, M.granite, ROOF.royal, (CORNER_R + .14) * CONE);
   wing(a, { u0: -9.6, u1: -4.2, v0: -4.0, v1: -1.9, z0: 0, z1: 124 }, [-9.6, -1.9]);
   barracks(a);
   chapel(a);
@@ -213,6 +231,7 @@ function palace(a: Atelier): void {
   squareTower(a, WU, 0, .6, 124);
   wall(a, { u0: -WU, u1: -2.4, v0: WV - .17, v1: WV + .17, z0: 0, z1: WALL_H }, [-9.2, -5.7, -3.3]);
   wall(a, { u0: 2.4, u1: WU, v0: WV - .17, v1: WV + .17, z0: 0, z1: WALL_H }, [3.3, 5.7, 9.2]);
+  for (const u of [-8.2, -4.6, 4.6, 8.2]) a.ivy(u, WV + .17, .7, 56);
   squareTower(a, -6.9, WV, .55, 120); squareTower(a, 6.9, WV, .55, 120);
   a.box({ u0: -1, u1: 1, v0: WV + .3, v1: WV + 1.6, z0: 0, z1: 3 }, M.timber);
   for (let u = -.95; u < 1; u += .2) a.line(0x5c3b22, [[u, WV + .3, 3.1], [u, WV + 1.6, 3.1]], .8);
@@ -225,10 +244,11 @@ function palace(a: Atelier): void {
   const shield = a.at([0, gate.v1 + .006, 100]);
   a.g.fillStyle(0x7a1f18, 1).fillRoundedRect(shield.x - 17, shield.y - 17, 34, 36, 7).fillStyle(GOLD, 1).fillCircle(shield.x, shield.y, 11.5).fillStyle(0xfff3b0, 1).fillCircle(shield.x - 3.5, shield.y - 3.5, 3.4);
   a.cornice(gate, .07, 5, M.granite); a.merlons(gate, M.granite, .14, 10);
-  a.tower(-1.85, 4.5, GATE_R, GATE_H, M.granite, ROOF.royal);
-  a.tower(1.85, 4.5, GATE_R, GATE_H, M.granite, ROOF.royal);
+  a.tower(-1.85, 4.5, GATE_R, GATE_H, M.granite, ROOF.royal, (GATE_R + .14) * CONE);
+  a.tower(1.85, 4.5, GATE_R, GATE_H, M.granite, ROOF.royal, (GATE_R + .14) * CONE);
   a.lamp(-1.3, 6.15, 28); a.lamp(1.3, 6.15, 28);
-  a.tower(WU, WV, CORNER_R, CORNER_H, M.granite, ROOF.royal);
+  a.tower(WU, WV, CORNER_R, CORNER_H, M.granite, ROOF.royal, (CORNER_R + .14) * CONE);
+  a.ivy(WU - .5, WV + .7, .4, 70);
 }
 
 export const PALACE_BUILDER = palace;

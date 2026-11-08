@@ -92,6 +92,20 @@ export class Atelier {
         pts: [[u + Math.cos(a0) * r, v + Math.sin(a0) * r, z0], [u + Math.cos(a1) * r, v + Math.sin(a1) * r, z0], [u, v, z0 + height]] });
     }
     for (const s of segs.sort((a, b) => a.depth - b.depth)) this.face(shade(color, s.light), s.pts);
+    // courses of roof tiles: rings around the visible side, with staggered joints between them
+    for (let k = 1; k < 6; k++) {
+      const t = k / 6, rr = r * (1 - t), zz = z0 + height * t, prev = r * (1 - (k - 1) / 6), zp = z0 + height * (k - 1) / 6;
+      const ring: Point3[] = [];
+      for (let i = 0; i <= 12; i++) { const ang = -Math.PI * .25 + i / 12 * Math.PI; ring.push([u + Math.cos(ang) * rr, v + Math.sin(ang) * rr, zz]); }
+      this.line(shade(color, -26), ring, 1, .55);
+      for (let i = 0; i < 6; i++) {
+        const ang = -Math.PI * .25 + (i + (k % 2) * .5 + .25) / 6 * Math.PI;
+        this.line(shade(color, -22), [[u + Math.cos(ang) * rr, v + Math.sin(ang) * rr, zz], [u + Math.cos(ang) * prev, v + Math.sin(ang) * prev, zp]], .8, .45);
+      }
+    }
+    const eave: Point3[] = [];
+    for (let i = 0; i <= 14; i++) { const ang = -Math.PI * .25 + i / 14 * Math.PI; eave.push([u + Math.cos(ang) * r, v + Math.sin(ang) * r, z0 + 1]); }
+    this.line(finial, eave, 1.6, .9);
     // a ring of eaves and the gilded finial
     for (let i = 0; i < n; i++) {
       const a0 = i / n * Math.PI * 2, a1 = (i + 1) / n * Math.PI * 2;
@@ -112,7 +126,7 @@ export class Atelier {
     this.line(GOLD, [[cu, cv, b.z1 + rise - 1], [cu, cv, b.z1 + rise + 8]], 2);
   }
   /** A hipped roof: four slopes up to a short ridge along the long side. */
-  hip(b: Box, rise: number, roof: Roof): void {
+  hip(b: Box, rise: number, roof: Roof, ridge?: number): void {
     const o = .1, alongU = b.u1 - b.u0 >= b.v1 - b.v0, inset = Math.min(b.u1 - b.u0, b.v1 - b.v0) / 2;
     const r0: Point3 = alongU ? [b.u0 + inset, (b.v0 + b.v1) / 2, b.z1 + rise] : [(b.u0 + b.u1) / 2, b.v0 + inset, b.z1 + rise];
     const r1: Point3 = alongU ? [b.u1 - inset, (b.v0 + b.v1) / 2, b.z1 + rise] : [(b.u0 + b.u1) / 2, b.v1 - inset, b.z1 + rise];
@@ -126,7 +140,7 @@ export class Atelier {
       this.face(roof[0], [D, C, r1]); this.face(shade(roof[1], -8), [B, C, r1, r0]);
       for (let t = .12; t < 1; t += .12) { const v = b.v0 + (b.v1 - b.v0) * t; this.line(shade(roof[1], -22), [[b.u1 + o, v, b.z1], [r0[0], Math.min(Math.max(v, r0[1]), r1[1]), r0[2]]], .8, .7); }
     }
-    this.line(shade(roof[0], 30), [r0, r1], 2);
+    this.line(ridge ?? shade(roof[0], 30), [r0, r1], ridge ? 2.6 : 2);
   }
   /** A gabled roof whose ridge runs along u (gable end on the +u face) or along v. */
   gable(b: Box, rise: number, roof: Roof, wall: Colors, alongU = true): void {
@@ -163,6 +177,13 @@ export class Atelier {
   /** A round tower: shaft, string courses, arrow slits, crenellated top and a conical roof. */
   tower(u: number, v: number, r: number, height: number, stone: Colors, roof: Roof, coneRise = r * 95): void {
     this.cylinder(u, v, r, 0, height, stone.frontLeft, stone.top);
+    // stone courses on the shaft, each a little lighter towards the top
+    for (let z = 12; z < height - 6; z += 12) {
+      const ring: Point3[] = [];
+      for (let i = 0; i <= 10; i++) { const ang = -Math.PI * .2 + i / 10 * Math.PI * .95; ring.push([u + Math.cos(ang) * r, v + Math.sin(ang) * r, z]); }
+      this.line(shade(stone.frontLeft, -12), ring, .6, .45);
+    }
+    this.line(GOLD, [[u - r * .7, v + r * .7, height - 4], [u + r * .7, v + r * .7, height - 4]], 1.4, .8);
     for (let z = 34; z < height - 10; z += 34) this.line(shade(stone.frontLeft, -18), [[u - r * .7, v + r * .7, z], [u + r * .7, v + r * .7, z]], .8, .6);
     for (let z = 28; z < height - 20; z += 38) this.face(GLASS, [[u - .03, v + r + .002, z], [u + .03, v + r + .002, z], [u + .03, v + r + .002, z + 12], [u - .03, v + r + .002, z + 12]]);
     this.cylinder(u, v, r + .08, height, height + 6, stone.frontLeft, stone.top);
@@ -249,6 +270,14 @@ export class Atelier {
   lamp(u: number, v: number, h = 30): void {
     this.line(0x3a3328, [[u, v, 0], [u, v, h]], 2);
     this.box({ u0: u - .05, u1: u + .05, v0: v - .05, v1: v + .05, z0: h, z1: h + 7 }, mat(0x5a4a32, GLOW, 0xd9a64a));
+  }
+  /** Ivy climbing the +v face of a wall, from the ground up to z. */
+  ivy(u: number, v: number, width: number, z: number): void {
+    for (let k = 0; k < 22; k++) {
+      const t = k / 22, du = (Math.sin(k * 7.3) * .5) * width, zz = (1 - t * t) * z * (.4 + .6 * Math.abs(Math.sin(k * 3.1)));
+      const p = this.at([u + du, v + .006, zz]);
+      this.g.fillStyle(k % 3 ? 0x3f8a3f : 0x5fae4a, .95).fillCircle(p.x, p.y, 3.2 + (k % 2));
+    }
   }
   /** A bench facing +v. */
   bench(u: number, v: number): void {

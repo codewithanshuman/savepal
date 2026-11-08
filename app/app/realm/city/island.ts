@@ -25,8 +25,6 @@ const TREES: Record<string, Asset> = {
   birch: { key: "savepal:tree:birch", width: 80, height: 120, anchorY: 12 },
   cloud: { key: "savepal:cloud", width: 260, height: 120, anchorY: 60 },
 };
-export const FALL_FRAMES = 6;
-const fallKey = (i: number) => `savepal:fall:${i}`;
 
 const at = (gx: number, gy: number, z = 0) => { const p = projection.project(gx, gy); return { x: p.x, y: p.y - z }; };
 const hash = (a: number, b: number) => { const x = Math.sin(a * 127.1 + b * 311.7) * 43758.5453; return x - Math.floor(x); };
@@ -38,30 +36,17 @@ function bakeIsland(scene: Phaser.Scene): void {
     birch: a => { const g = a.g, foot = a.at([0, 0, 0]); g.fillStyle(0x1c2e14, .2).fillEllipse(foot.x + 5, foot.y + 2, 24, 10); a.line(0xf4f1ea, [[0, 0, 0], [0, 0, 40]], 3.4); for (const z of [10, 22, 32]) { const p = a.at([0, 0, z]); g.fillStyle(0x3a3328, 1).fillRect(p.x - 1.6, p.y, 3.2, 1.6); } for (const [dx, dz, r, c] of [[-8, 44, 12, 0x7fbf4a], [8, 46, 11, 0x8fd060], [0, 56, 13, 0x9bd86a]] as const) { const p = a.at([0, 0, dz]); g.fillStyle(c, 1).fillCircle(p.x + dx, p.y, r); } },
     cloud: a => { const g = a.g, o = a.at([0, 0, 0]); for (const [dx, dy, r, alpha] of [[-60, 8, 34, .9], [-20, -8, 44, .95], [30, 0, 40, .95], [70, 10, 28, .9], [0, 16, 46, .9]] as const) { g.fillStyle(0xffffff, alpha).fillCircle(o.x + dx, o.y + dy, r); } g.fillStyle(0xdfe9f3, .7).fillEllipse(o.x + 4, o.y + 34, 200, 26); },
   });
-  // the falling water: a ribbon of streaks that slides down frame by frame
-  if (!scene.textures.exists(fallKey(0))) {
-    for (let f = 0; f < FALL_FRAMES; f++) {
-      const g = scene.make.graphics({ x: 0, y: 0 }, false), W = 40, H = CLIFF + 20;
-      g.fillStyle(0x6fc0ef, .92).fillRect(0, 0, W, H);
-      g.fillStyle(0x4aa3dc, .6).fillRect(W * .62, 0, W * .38, H);
-      for (let s = 0; s < 9; s++) {
-        const x = 3 + s * 4.2, y = ((f / FALL_FRAMES) * 36 + s * 13) % 36;
-        for (let k = -1; k < H / 36 + 1; k++) g.fillStyle(0xffffff, .55).fillRect(x, y + k * 36, 1.6, 14);
-      }
-      g.fillStyle(0xffffff, .8).fillRect(0, 0, W, 3);
-      g.generateTexture(fallKey(f), W, H); g.destroy();
-      scene.textures.get(fallKey(f)).setFilter(1);
-    }
-    scene.anims.create({ key: "savepal:fall", frames: Array.from({ length: FALL_FRAMES }, (_, i) => ({ key: fallKey(i) })), frameRate: 14, repeat: -1 });
-  }
   if (!scene.textures.exists("savepal:mote")) {
     const g = scene.make.graphics({ x: 0, y: 0 }, false);
     g.fillStyle(0xffffff, 1).fillCircle(8, 8, 8); g.generateTexture("savepal:mote", 16, 16); g.destroy();
   }
 }
 
+type Fall = { g: Phaser.GameObjects.Graphics; a: { x: number; y: number }; b: { x: number; y: number }; seed: number };
+
 export class Island {
   private objects: Phaser.GameObjects.GameObject[] = [];
+  private falls: Fall[] = [];
   private built = false;
   private readonly still = typeof window !== "undefined" && typeof window.matchMedia === "function" && window.matchMedia("(prefers-reduced-motion: reduce)").matches;
   constructor(private readonly scene: Phaser.Scene) {}
@@ -106,28 +91,28 @@ export class Island {
     };
     surfLine(at(U0, V1), at(U1, V1)); surfLine(at(U1, V1), at(U1, V0));
     if (!this.still) this.scene.tweens.add({ targets: surf, alpha: .45, duration: 1800, yoyo: true, repeat: -1, ease: "Sine.easeInOut" });
-    // the waterfalls and their streams
+    // the waterfalls and their streams: a channel across the land that widens to the cliff edge,
+    // then falling water drawn on the cliff face itself (redrawn each frame in update())
     for (const f of FALLS) {
-      const edge = f.face === "v" ? { u: f.at, v: V1 } : { u: U1, v: f.at };
-      const src = f.face === "v" ? { u: f.at, v: V1 - f.spring } : { u: U1 - f.spring, v: f.at };
+      const along = (t: number, w: number) => f.face === "v" ? at(f.at + w, V1 - f.spring * (1 - t)) : at(U1 - f.spring * (1 - t), f.at + w);
       const stream = add(this.scene.add.graphics().setDepth(GROUND_DEPTH + 5));
-      const w = .32, pts = f.face === "v"
-        ? [at(src.u - w, src.v), at(src.u + w, src.v), at(edge.u + w, edge.v), at(edge.u - w, edge.v)]
-        : [at(src.u, src.v - w), at(src.u, src.v + w), at(edge.u, edge.v + w), at(edge.u, edge.v - w)];
-      stream.fillStyle(0x8a7a5c, 1).fillPoints(pts.map(p => ({ x: p.x, y: p.y + 2 })), true).fillStyle(0x4aa3dc, 1).fillPoints(pts, true);
-      const pool = at(src.u, src.v); stream.fillStyle(0x8a7a5c, 1).fillEllipse(pool.x, pool.y + 2, 74, 34).fillStyle(0x4aa3dc, 1).fillEllipse(pool.x, pool.y, 66, 28).fillStyle(0xd8f0ff, .6).fillEllipse(pool.x - 10, pool.y - 4, 18, 4);
-      for (const [du, dv] of [[-.6, -.4], [.6, -.3], [-.5, .5]] as const) { const r = at(src.u + du, src.v + dv); stream.fillStyle(0x9a9286, 1).fillEllipse(r.x, r.y, 14, 8).fillStyle(0xb8b0a2, 1).fillEllipse(r.x - 2, r.y - 2, 9, 5); }
-      const lip = at(edge.u, edge.v);
-      const fall = add(this.scene.add.sprite(lip.x, lip.y - 2, fallKey(0)).setOrigin(.5, 0).setDepth(GROUND_DEPTH + 6).setScale(1.1, 1));
-      if (f.face === "u") fall.setFlipX(true);
-      if (!this.still) fall.play("savepal:fall");
-      const foot = { x: lip.x, y: lip.y + CLIFF + 10 };
-      add(this.scene.add.ellipse(foot.x, foot.y, 70, 18, 0xffffff, .8).setDepth(GROUND_DEPTH + 6.5));
+      const steps = 10, bank: Array<{ x: number; y: number }> = [], water: Array<{ x: number; y: number }> = [];
+      for (let i = 0; i <= steps; i++) { const t = i / steps, w = .26 + t * .26; bank.push(along(t, -w - .08)); water.push(along(t, -w)); }
+      for (let i = steps; i >= 0; i--) { const t = i / steps, w = .26 + t * .26; bank.push(along(t, w + .08)); water.push(along(t, w)); }
+      stream.fillStyle(0x7b6a4e, 1).fillPoints(bank, true).fillStyle(0x3f9fd8, 1).fillPoints(water, true);
+      for (let i = 1; i < steps; i++) { const t = i / steps, p = along(t, Math.sin(i * 1.7) * .12); stream.fillStyle(0xd8f0ff, .7).fillEllipse(p.x, p.y, 10, 2.2); }
+      const pool = along(0, 0);
+      stream.fillStyle(0x7b6a4e, 1).fillEllipse(pool.x, pool.y + 2, 84, 38).fillStyle(0x3f9fd8, 1).fillEllipse(pool.x, pool.y, 74, 31).fillStyle(0x6fc0ef, .8).fillEllipse(pool.x - 8, pool.y - 4, 34, 10);
+      for (const [du, dv] of [[-.62, -.32], [.6, -.24], [-.5, .42], [.45, .4]] as const) { const r = f.face === "v" ? at(f.at + du, V1 - f.spring + dv) : at(U1 - f.spring + dv, f.at + du); stream.fillStyle(0x8f877a, 1).fillEllipse(r.x, r.y + 1, 18, 10).fillStyle(0xb8b0a2, 1).fillEllipse(r.x - 2, r.y - 2, 12, 6); }
+      const a = f.face === "v" ? at(f.at - .52, V1) : at(U1, f.at - .52), b = f.face === "v" ? at(f.at + .52, V1) : at(U1, f.at + .52);
+      const g = add(this.scene.add.graphics().setDepth(GROUND_DEPTH + 6));
+      this.falls.push({ g, a, b, seed: this.falls.length * 17 });
+      this.drawFall(this.falls[this.falls.length - 1]!, 0);
+      const foot = { x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 + CLIFF + 8 };
       if (!this.still) {
-        const mist = add(this.scene.add.particles(foot.x, foot.y, "savepal:mote", {
-          x: { min: -26, max: 26 }, speedY: { min: -40, max: -14 }, speedX: { min: -12, max: 12 }, lifespan: 1600, scale: { start: .5, end: 1.4 }, alpha: { start: .5, end: 0 }, quantity: 2, frequency: 90, tint: 0xeaf6ff,
+        add(this.scene.add.particles(foot.x, foot.y, "savepal:mote", {
+          x: { min: -34, max: 34 }, speedY: { min: -46, max: -16 }, speedX: { min: -14, max: 14 }, lifespan: 1700, scale: { start: .55, end: 1.5 }, alpha: { start: .55, end: 0 }, quantity: 2, frequency: 80, tint: 0xeaf6ff,
         }).setDepth(GROUND_DEPTH + 7));
-        void mist;
       }
     }
     // the forest ring: our trees on the grass ring, thinning where the port's pier runs out
@@ -153,9 +138,34 @@ export class Island {
     }
   }
 
+  /** Falling water: a sheet on the cliff face with streaks sliding down, foam at the lip and a churning pool. */
+  private drawFall(f: Fall, time: number): void {
+    const { g, a, b } = f, H = CLIFF + 6, flow = time * .16;
+    g.clear();
+    g.fillStyle(0x2f86c4, .96).fillPoints([a, b, { x: b.x, y: b.y + H }, { x: a.x, y: a.y + H }], true);
+    g.fillStyle(0x5fb6ea, .9).fillPoints([a, { x: a.x + (b.x - a.x) * .55, y: a.y + (b.y - a.y) * .55 }, { x: a.x + (b.x - a.x) * .55, y: a.y + (b.y - a.y) * .55 + H }, { x: a.x, y: a.y + H }], true);
+    for (let k = 0; k < 11; k++) {
+      const t = (k + .5) / 11, x = a.x + (b.x - a.x) * t, y0 = a.y + (b.y - a.y) * t, len = 12 + (k % 3) * 5;
+      for (let off = ((flow + k * 23 + f.seed) % 34) - 34; off < H; off += 34) {
+        const y = y0 + Math.max(0, off), y2 = Math.min(y0 + H, y0 + off + len);
+        if (y2 > y) g.lineStyle(k % 2 ? 1.6 : 2.4, 0xffffff, k % 2 ? .45 : .7).beginPath().moveTo(x, y).lineTo(x, y2).strokePath();
+      }
+    }
+    // foam curling over the lip, and the churning pool at the foot
+    g.lineStyle(5, 0xffffff, .9).beginPath().moveTo(a.x, a.y + 2).lineTo(b.x, b.y + 2).strokePath();
+    const mx = (a.x + b.x) / 2, my = (a.y + b.y) / 2 + H, w = Math.abs(b.x - a.x) + 30, pulse = Math.sin(time / 180) * 3;
+    g.fillStyle(0xffffff, .85).fillEllipse(mx, my + 4, w + pulse * 2, 18 + pulse);
+    g.fillStyle(0xd8f0ff, .7).fillEllipse(mx - 10, my + 10, w * .6, 10).fillEllipse(mx + 14, my + 12, w * .45, 8);
+  }
+
+  update(time: number): void {
+    if (this.still) return;
+    for (const f of this.falls) this.drawFall(f, time);
+  }
+
   destroy(): void {
     for (const o of this.objects) { this.scene.tweens.killTweensOf(o); o.destroy(); }
-    this.objects = []; this.built = false;
+    this.objects = []; this.falls = []; this.built = false;
   }
 }
 

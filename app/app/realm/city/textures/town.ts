@@ -10,7 +10,7 @@ export const TOWN = {
   bazaar: { key: "savepal:bazaar", width: 840, height: 540, anchorY: 220 },
   bountyStall: { key: "savepal:bounty-stall", width: 120, height: 120, anchorY: 34 },
   guild: { key: "savepal:guild", width: 580, height: 500, anchorY: 150 },
-  port: { key: "savepal:port", width: 1100, height: 620, anchorY: 420, originX: 270 },
+  port: { key: "savepal:port", width: 1000, height: 720, anchorY: 520, originX: 300 },
   galley: { key: "savepal:galley", width: 380, height: 280, anchorY: 120 },
   homestead0: { key: "savepal:homestead:0", width: 560, height: 420, anchorY: 150 },
   homestead1: { key: "savepal:homestead:1", width: 560, height: 420, anchorY: 150 },
@@ -124,38 +124,40 @@ function guild(a: Atelier): void {
   a.tree(-2.1, 2, 1.1); a.cypress(2.25, 2.25, .9); a.barrel(.35, 1.9); a.barrel(.6, 2.15);
 }
 
-export function galley(a: Atelier, u0: number, u1: number, v: number): void {
+/** A galley under oar and sail; z lifts the whole ship (sea level at the port is below the cliff). */
+export function galley(a: Atelier, u0: number, u1: number, v: number, z = 0): void {
   const hull = 0x5a3a22, mid = (u0 + u1) / 2;
-  a.face(shade(hull, -15), [[u0 + .3, v - .4, -6], [u1 - .2, v - .4, -6], [u1 + .25, v, 6], [u1 - .2, v + .4, -6], [u0 + .3, v + .4, -6], [u0, v, 4]]);
-  a.face(hull, [[u0 + .3, v + .4, -6], [u1 - .2, v + .4, -6], [u1 - .2, v + .4, 10], [u0 + .3, v + .4, 10]]);
-  a.face(shade(hull, -25), [[u1 - .2, v + .4, -6], [u1 + .25, v, 6], [u1 + .25, v, 14], [u1 - .2, v + .4, 10]]);
-  a.face(0xc79a62, [[u0 + .3, v - .4, 10], [u1 - .2, v - .4, 10], [u1 + .25, v, 14], [u1 - .2, v + .4, 10], [u0 + .3, v + .4, 10], [u0, v, 12]]);
-  for (let u = u0 + .5; u < u1 - .3; u += .3) a.line(0xd8b27a, [[u, v + .4, 4], [u - .2, v + .75, -10]], 1.2);
-  a.face(GOLD, [[u0 + .3, v + .41, 7], [u1 - .2, v + .41, 7], [u1 - .2, v + .41, 9], [u0 + .3, v + .41, 9]]);
-  a.line(0x4a3020, [[mid, v, 12], [mid, v, 92]], 3);
-  a.face(0xf6eedb, [[mid - .05, v - .5, 86], [mid - .05, v + .5, 86], [mid - .05, v + .55, 34], [mid - .05, v - .55, 34]]);
-  a.face(0xc0392b, [[mid - .052, v - .52, 66], [mid - .052, v + .52, 66], [mid - .052, v + .53, 56], [mid - .052, v - .53, 56]]);
-  a.line(0x4a3020, [[mid, v - .55, 87], [mid, v + .55, 87]], 2);
+  a.face(shade(hull, -15), [[u0 + .3, v - .4, z - 6], [u1 - .2, v - .4, z - 6], [u1 + .25, v, z + 6], [u1 - .2, v + .4, z - 6], [u0 + .3, v + .4, z - 6], [u0, v, z + 4]]);
+  a.face(hull, [[u0 + .3, v + .4, z - 6], [u1 - .2, v + .4, z - 6], [u1 - .2, v + .4, z + 10], [u0 + .3, v + .4, z + 10]]);
+  a.face(shade(hull, -25), [[u1 - .2, v + .4, z - 6], [u1 + .25, v, z + 6], [u1 + .25, v, z + 14], [u1 - .2, v + .4, z + 10]]);
+  a.face(0xc79a62, [[u0 + .3, v - .4, z + 10], [u1 - .2, v - .4, z + 10], [u1 + .25, v, z + 14], [u1 - .2, v + .4, z + 10], [u0 + .3, v + .4, z + 10], [u0, v, z + 12]]);
+  for (let u = u0 + .5; u < u1 - .3; u += .3) a.line(0xd8b27a, [[u, v + .4, z + 4], [u - .2, v + .75, z - 10]], 1.2);
+  a.face(GOLD, [[u0 + .3, v + .41, z + 7], [u1 - .2, v + .41, z + 7], [u1 - .2, v + .41, z + 9], [u0 + .3, v + .41, z + 9]]);
+  for (const [du, c] of [[.25, 0xc0392b], [.75, 0x2f6fdc]] as const) { const p = a.at([u0 + (u1 - u0) * du, v + .412, z + 4]); a.g.fillStyle(c, 1).fillCircle(p.x, p.y, 3.4).fillStyle(GOLD, 1).fillCircle(p.x, p.y, 1.4); }
+  a.line(0x4a3020, [[mid, v, z + 12], [mid, v, z + 96]], 3);
+  a.face(0xf6eedb, [[mid - .05, v - .52, z + 90], [mid - .05, v + .52, z + 90], [mid - .05, v + .58, z + 36], [mid - .05, v - .58, z + 36]]);
+  a.face(0xc0392b, [[mid - .052, v - .54, z + 70], [mid - .052, v + .54, z + 70], [mid - .052, v + .56, z + 59], [mid - .052, v - .56, z + 59]]);
+  a.line(0x4a3020, [[mid, v - .58, z + 91], [mid, v + .58, z + 91]], 2);
+  a.line(0x3a2a1a, [[mid, v, z + 96], [u1 + .2, v, z + 14]], .8, .7); a.line(0x3a2a1a, [[mid, v, z + 96], [u0 + .1, v, z + 12]], .8, .7);
 }
 
+/** The cliff: the island's edge is 2 tiles east of the port block; the sea is 130 px below. */
+const EDGE = 4.5, SEA = -130;
+
 function port(a: Atelier): void {
+  // the cliff-top quay: grass, a cobbled lane to the edge and a stone parapet with a gap for the stair
   a.pad(-2.5, -2.5, 2.5, 2.5, M.meadow.top);
   a.pad(-1.2, -2.4, 2.5, 2.4, M.cobble.top, .2);
-  a.box({ u0: 2.3, u1: 2.6, v0: -2.5, v1: 2.5, z0: -14, z1: .5 }, M.granite);
-  // the jetty runs over the shore and the pier out past the beach into deep water
-  for (let u = 2.9; u < 13.3; u += .55) for (const v of [-.5, .5]) a.line(0x4a3020, [[u, v, -16], [u, v, 1]], 2.5);
-  a.box({ u0: 2.6, u1: 13.2, v0: -.55, v1: .55, z0: 0, z1: 3 }, M.timber);
-  for (let u = 2.7; u < 13.2; u += .18) a.line(0x5c3b22, [[u, -.55, 3.1], [u, .55, 3.1]], .7);
-  for (const u of [9.5, 11, 12.5]) for (const v of [-.6, .6]) a.cylinder(u, v, .06, 3, 11, 0x4a3020, 0x6b4527);
-  for (const u of [4, 6]) a.lamp(u, .62, 26);
-  galley(a, 9.2, 12.6, -1.6);
+  a.pad(2.4, -.45, EDGE, .45, M.cobble.top, .2);
+  for (let v = -2.4; v < -.55; v += .5) a.box({ u0: EDGE - .18, u1: EDGE, v0: v, v1: v + .4, z0: 0, z1: 12 }, M.granite);
+  for (let v = .65; v < 2.6; v += .5) a.box({ u0: EDGE - .18, u1: EDGE, v0: v, v1: Math.min(2.5, v + .4), z0: 0, z1: 12 }, M.granite);
   // the customs house with its arcade and watch tower
   const body: Box = { u0: -2.2, u1: .6, v0: -2.2, v1: .6, z0: 0, z1: 80 };
   a.shadow(body.u0, body.v0, body.u1, body.v1);
   a.box(body, M.sandstone);
   a.arches(body.v1 + .004, body.u0 + .1, body.u1 - .1, 0, 40, 4, 0x3b2c22, shade(M.sandstone.frontLeft, 14));
   a.cornice({ ...body, z1: 46 }, .03, 3, M.sandstone);
-  a.arches(body.v1 + .004, body.u0 + .1, body.u1 - .1, 52, 74, 6, GLASS);
+  a.arches(body.v1 + .004, body.u0 + .1, body.u1 - .1, 52, 74, 6, GLASS, shade(M.sandstone.frontLeft, 14));
   a.sideArches(body.u1 + .004, body.v0 + .15, body.v1 - .15, 6, 40, 3, 0x3b2c22); a.sideArches(body.u1 + .004, body.v0 + .15, body.v1 - .15, 52, 74, 4, GLASS);
   a.cornice(body, .07, 5, M.sandstone); a.merlons(body, M.sandstone, .15, 8);
   const tower: Box = { u0: .2, u1: 1.4, v0: -1.6, v1: -.4, z0: 0, z1: 136 };
@@ -164,14 +166,30 @@ function port(a: Atelier): void {
   a.line(0x4a3a2a, [[PORT_FLAG.u, PORT_FLAG.v, 144], [PORT_FLAG.u, PORT_FLAG.v, PORT_FLAG.z]], 2);
   for (const [u, v] of [[-1.6, 1.5], [-1.3, 1.8], [-.9, 1.6], [1.2, 1.4], [1.5, 1.7]] as const) a.crate(u, v);
   for (const [u, v] of [[1.9, -1.8], [2.05, -1.5], [1.85, 1.2]] as const) a.barrel(u, v);
-  // the lighthouse at the pier head: a stone tower with a fire burning at its top
-  a.cylinder(13.1, .9, .46, -14, 84, M.limestone.frontLeft, M.limestone.top);
-  for (const z of [20, 48]) a.line(shade(M.limestone.frontLeft, -16), [[12.8, 1.22, z], [13.4, 1.22, z]], .8, .6);
-  a.cylinder(13.1, .9, .54, 84, 90, M.granite.frontLeft, M.granite.top);
-  a.cylinder(13.1, .9, .28, 90, 104, 0xff9a3c, 0xffd36a);
-  const fire = a.at([13.1, .9, 110]); a.g.fillStyle(0xffd36a, .55).fillCircle(fire.x, fire.y, 16).fillStyle(0xfff3c4, .9).fillCircle(fire.x, fire.y, 7);
-  a.cone(13.1, .9, .38, 104, 28, ROOF.terracotta[0]);
-  a.lamp(-1.6, 2.35, 28); a.lamp(1.8, 2.35, 28);
+  a.lamp(-1.6, 2.35, 28); a.lamp(1.8, 2.35, 28); a.lamp(EDGE - .3, -.6, 28);
+  // the stone stair down the cliff face: a masonry flank, then the steps from the top to the sea
+  const v0 = -.45, v1 = 3.0, steps = 18, uo = EDGE + .62;
+  a.face(M.granite.frontRight, [[uo, v0, 0], [uo, v1, SEA], [uo, v1, SEA - 4], [uo, v0, SEA - 4]]);
+  for (let z = -16; z > SEA; z -= 16) a.line(shade(M.granite.frontRight, -14), [[uo + .001, v0, z], [uo + .001, Math.min(v1, v0 + (v1 - v0) * (z / SEA)), z]], .7, .55);
+  for (let k = 0; k < steps; k++) {
+    const t0 = k / steps, t1 = (k + 1) / steps, va = v0 + (v1 - v0) * t0, vb = v0 + (v1 - v0) * t1, z = SEA * t0;
+    a.box({ u0: EDGE, u1: uo, v0: va, v1: vb, z0: z - 6, z1: z }, M.paving);
+  }
+  // the landing and the wooden dock at sea level, on posts
+  a.box({ u0: EDGE, u1: EDGE + 1.3, v0: 2.6, v1: 3.6, z0: SEA - 6, z1: SEA + 2 }, M.granite);
+  for (let u = EDGE + 1.5; u < 10.1; u += .55) for (const v of [2.5, 3.5]) a.line(0x4a3020, [[u, v, SEA - 18], [u, v, SEA + 2]], 2.5);
+  a.box({ u0: EDGE + 1.3, u1: 10.1, v0: 2.45, v1: 3.55, z0: SEA, z1: SEA + 3 }, M.timber);
+  for (let u = EDGE + 1.4; u < 10.1; u += .18) a.line(0x5c3b22, [[u, 2.45, SEA + 3.1], [u, 3.55, SEA + 3.1]], .7);
+  for (const u of [6.4, 7.9, 9.4]) for (const v of [2.4, 3.6]) a.cylinder(u, v, .06, SEA + 3, SEA + 11, 0x4a3020, 0x6b4527);
+  galley(a, 6.0, 9.4, 1.55, SEA);
+  // the lighthouse on its rock at the end of the dock, its fire level with the cliff top
+  a.cylinder(10.8, 3.0, .78, SEA - 14, SEA + 6, 0x7d7468, 0x9a9286);
+  a.cylinder(10.8, 3.0, .46, SEA + 6, SEA + 104, M.limestone.frontLeft, M.limestone.top);
+  for (const z of [SEA + 34, SEA + 66]) a.line(shade(M.limestone.frontLeft, -16), [[10.5, 3.32, z], [11.1, 3.32, z]], .8, .6);
+  a.cylinder(10.8, 3.0, .54, SEA + 104, SEA + 110, M.granite.frontLeft, M.granite.top);
+  a.cylinder(10.8, 3.0, .28, SEA + 110, SEA + 124, 0xff9a3c, 0xffd36a);
+  const fire = a.at([10.8, 3.0, SEA + 130]); a.g.fillStyle(0xffd36a, .55).fillCircle(fire.x, fire.y, 16).fillStyle(0xfff3c4, .9).fillCircle(fire.x, fire.y, 7);
+  a.cone(10.8, 3.0, .38, SEA + 124, 28, ROOF.terracotta[0]);
 }
 
 type House = { wall: Colors; roof: Roof; storeys: number; timber?: boolean; hip?: boolean; garden: "veg" | "berries" | "orchard" | "vines"; door?: number };

@@ -13,7 +13,8 @@ import { nearShore, tileKeyFor, type ScreenPoint } from "../../core/worldMath";
 import { worldToScreen } from "../../utils/hitZoneUtils";
 import { isCanvasPointer } from "../../utils/pointerUtils";
 import type { TerrainGrid } from "../../../layouts/terrain";
-import { TERRAIN_ATLAS_KEY } from "../../../textures/terrain";
+import { ATLAS_RES, TERRAIN_ATLAS_KEY } from "../../../textures/terrain";
+import { TILE_WIDTH } from "../../../textures/core";
 import { TILE_ANCHOR_Y } from "../../../textures/core";
 import { propTextureKey } from "../../../textures/props";
 import {
@@ -60,6 +61,8 @@ export class WorldTerrainManager {
       const sprite = this.scene.add
         .sprite(point.x, point.y + TILE_ANCHOR_Y, TERRAIN_ATLAS_KEY, tileKeyFor(cell))
         .setOrigin(0.5, 1)
+        // SavePal: the atlas is baked at ATLAS_RES; a hair of overscale closes seams between tiles
+        .setScale((1 / ATLAS_RES) * ((TILE_WIDTH * ATLAS_RES) / (TILE_WIDTH * ATLAS_RES - 2)) * 1.01)
         .setDepth(GROUND_DEPTH);
       this.groundSprites.push(sprite);
 

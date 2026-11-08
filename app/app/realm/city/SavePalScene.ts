@@ -233,6 +233,7 @@ export class SavePalScene extends WorldScene {
       b.setScale(kb).setPosition(b.getData("ax") + side * 136 * kb, b.getData("ay") + Math.sin(time / 420 + slot) * 7 * kb);
     }
     this.walk?.update(delta);
+    this.island?.update(time);
   }
 
   /** The archive's own scenery gives way to SavePal's: the capitol becomes the treasury; its props, clouds and ships hide. */
@@ -330,7 +331,8 @@ export class SavePalScene extends WorldScene {
       const p = at(s.x + (s.role === "palace" ? -6.5 : s.role === "bazaar" ? 0 : .3), s.y + front);
       this.plates.push(this.plate(s.label, p.x, p.y + 6, s.role === "page"));
     }
-    const t = at(capitol.maxX - .5, capitol.maxY + .2);
+    // on the open ground west of the treasury, clear of the bazaar and the workshops
+    const t = at(capitol.minX - .9, capitol.centerY + 1.5);
     this.plates.push(this.plate("ROYAL TREASURY", t.x, t.y));
   }
 
