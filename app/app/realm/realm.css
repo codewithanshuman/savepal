@@ -183,3 +183,7 @@ button.hud{font:inherit;color:inherit;text-align:left;cursor:pointer}
   .realm-labels.small .realm-chip:not(.land){display:none}
 }
 .hud-court{background:#0e1624}
+.realm-labels.small .realm-chip:not(.land){display:none}
+
+.hud-zoom .hud-sound{font-size:14px;color:#ffd15c}
+.hud-zoom .hud-sound.off{color:#8e9bb0}

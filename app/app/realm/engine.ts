@@ -9,12 +9,21 @@
  * ──────────────────────────────────────────────────────────────────────────── */
 
 export const HW = 16, HH = 8;
-export const GRID = 18;
-export const NATIVE_W = 780, NATIVE_H = 520;
-export const OX = NATIVE_W / 2 - 18, OY = 88;
+/** The kingdom is a grid of 6-tile city blocks: land runs from G0 to GRID, roads every BLOCK tiles. */
+export const GRID = 24, G0 = -12, BLOCK = 6;
+export const NATIVE_W = 1360, NATIVE_H = 720;
+export const OX = NATIVE_W / 2, OY = 240;
 
 export type P = { x: number; y: number };
-export const project = (u: number, v: number, z = 0): P => ({ x: OX + (u - v) * HW, y: OY + (u + v) * HH - z });
+let offU = 0, offV = 0;
+export const project = (u: number, v: number, z = 0): P => ({ x: OX + (u + offU - v - offV) * HW, y: OY + (u + offU + v + offV) * HH - z });
+/** Draws a building authored at its own coordinates somewhere else on the map. */
+export function at(du: number, dv: number, draw: () => void) {
+  const pu = offU, pv = offV; offU += du; offV += dv;
+  try { draw(); } finally { offU = pu; offV = pv; }
+}
+/** The civic centre (castle, treasury, guild, market and the first streets): what the camera frames first. */
+export const CORE = { x0: project(0, 18).x - 8, x1: project(18, 0).x + 8, y0: project(0, 0, 110).y, y1: project(18, 18).y + 12 };
 
 /* ── colour ── */
 /** Accepts "#rrggbb" or an "rgb(r,g,b)" produced by shade(), so shading can be chained. */
@@ -38,13 +47,57 @@ export function poly(ctx: CanvasRenderingContext2D, points: P[], fill: string, s
   if (stroke) { ctx.strokeStyle = stroke; ctx.lineWidth = 1; ctx.stroke(); }
 }
 
-export type BoxPaint = { base: string; top?: string; lit?: string; dark?: string; edge?: string };
-/** A solid box: the three faces a viewer sees under the fixed sun. */
+/** A one-pixel line plotted pixel by pixel, so edges stay crisp instead of anti-aliased. */
+export function pxLine(ctx: CanvasRenderingContext2D, a: P, b: P, color: string) {
+  let x0 = Math.round(a.x), y0 = Math.round(a.y);
+  const x1 = Math.round(b.x), y1 = Math.round(b.y), dx = Math.abs(x1 - x0), dy = -Math.abs(y1 - y0), sx = x0 < x1 ? 1 : -1, sy = y0 < y1 ? 1 : -1;
+  let err = dx + dy;
+  ctx.fillStyle = color;
+  for (let guard = 0; guard < 2000; guard++) {
+    ctx.fillRect(x0, y0, 1, 1);
+    if (x0 === x1 && y0 === y1) break;
+    const e2 = 2 * err;
+    if (e2 >= dy) { err += dy; x0 += sx; }
+    if (e2 <= dx) { err += dx; y0 += sy; }
+  }
+}
+const lerp = (a: P, b: P, f: number): P => ({ x: a.x + (b.x - a.x) * f, y: a.y + (b.y - a.y) * f });
+
+export type BoxPaint = { base: string; top?: string; lit?: string; dark?: string; edge?: string; finish?: boolean };
+/**
+ * A solid box: the three faces a viewer sees under the fixed sun. Big boxes get a finish:
+ * the near corner and top lip catch the light, the shaded lip and the foot sit darker.
+ */
 export function box(ctx: CanvasRenderingContext2D, u0: number, v0: number, u1: number, v1: number, z0: number, z1: number, c: BoxPaint) {
   const top = c.top ?? shade(c.base, 18), lit = c.lit ?? c.base, dark = c.dark ?? shade(c.base, -22);
   poly(ctx, [project(u1, v0, z1), project(u1, v1, z1), project(u1, v1, z0), project(u1, v0, z0)], dark, c.edge);
   poly(ctx, [project(u0, v1, z1), project(u1, v1, z1), project(u1, v1, z0), project(u0, v1, z0)], lit, c.edge);
   poly(ctx, [project(u0, v0, z1), project(u1, v0, z1), project(u1, v1, z1), project(u0, v1, z1)], top, c.edge);
+  if (c.finish === false || (u1 - u0) + (v1 - v0) < .9 || z1 - z0 < 4) return;
+  pxLine(ctx, project(u1, v1, z1), project(u1, v1, z0), shade(lit, 16));
+  pxLine(ctx, project(u0, v1, z1), project(u1, v1, z1), shade(top, 14));
+  pxLine(ctx, project(u1, v0, z1), project(u1, v1, z1), shade(dark, -14));
+  pxLine(ctx, project(u0, v1, z0), project(u1, v1, z0), shade(lit, -22));
+  pxLine(ctx, project(u1, v0, z0), project(u1, v1, z0), shade(dark, -22));
+}
+
+/** A roof balustrade along one visible face: posts every few pixels under a capping rail. */
+export function balustrade(ctx: CanvasRenderingContext2D, face: "u" | "v", atLine: number, from: number, to: number, z: number, color: string, h = 5) {
+  const n = Math.max(2, Math.round(Math.abs(to - from) / .17));
+  for (let i = 0; i <= n; i++) {
+    const c = from + (to - from) * i / n;
+    if (face === "v") onLit(ctx, atLine, c - .025, c + .025, z, z + h, color); else onShade(ctx, atLine, c - .025, c + .025, z, z + h, shade(color, -20));
+  }
+  if (face === "v") onLit(ctx, atLine, from, to, z + h, z + h + 1.5, shade(color, 6)); else onShade(ctx, atLine, from, to, z + h, z + h + 1.5, shade(color, -14));
+}
+
+/** Corner stones up the near corner of a wall, the detail that makes masonry read as built. */
+export function quoins(ctx: CanvasRenderingContext2D, u1: number, v1: number, z0: number, z1: number, color: string, w = .14) {
+  for (let z = z0 + 2, i = 0; z + 3 < z1; z += 5, i++) {
+    const a = i % 2 ? w * .6 : w;
+    poly(ctx, [project(u1 - a, v1, z + 3), project(u1, v1, z + 3), project(u1, v1, z), project(u1 - a, v1, z)], color);
+    poly(ctx, [project(u1, v1 - a, z + 3), project(u1, v1, z + 3), project(u1, v1, z), project(u1, v1 - a, z)], shade(color, -20));
+  }
 }
 
 /** A window or panel on the lit (+v) wall at v, spanning u0..u1 and z0..z1. */
@@ -63,8 +116,11 @@ export function hipRoof(ctx: CanvasRenderingContext2D, u0: number, v0: number, u
   poly(ctx, [project(u0, v0, z), project(u1, v0, z), a], shade(base, 6));           // −v slope
   poly(ctx, [project(u0, v1, z), project(u1, v1, z), a], base);                     // +v slope
   poly(ctx, [project(u1, v0, z), project(u1, v1, z), a], shade(base, -24));         // +u slope, in shade
-  ctx.strokeStyle = shade(base, -36); ctx.lineWidth = 1;
-  ctx.beginPath(); const e = project(u1, v1, z); ctx.moveTo(Math.round(e.x), Math.round(e.y)); ctx.lineTo(Math.round(a.x), Math.round(a.y)); ctx.stroke();
+  // tile courses on the two visible slopes, then crisp hips and a dark eave
+  const fl = project(u0, v1, z), fr = project(u1, v1, z), sb = project(u1, v0, z);
+  for (const f of [.25, .5, .72]) { pxLine(ctx, lerp(fl, a, f), lerp(fr, a, f), shade(base, -12)); pxLine(ctx, lerp(fr, a, f), lerp(sb, a, f), shade(base, -36)); }
+  pxLine(ctx, fr, a, shade(base, 26)); pxLine(ctx, fl, a, shade(base, 10)); pxLine(ctx, sb, a, shade(base, -40));
+  pxLine(ctx, fl, fr, shade(base, -42)); pxLine(ctx, fr, sb, shade(base, -50));
 }
 
 /** A gable roof whose ridge runs along u, with the gable end facing +u. */
@@ -73,8 +129,13 @@ export function gableRoof(ctx: CanvasRenderingContext2D, u0: number, v0: number,
   poly(ctx, [project(u0, v0, z), project(u1, v0, z), r1, r0], shade(base, 14));      // back slope
   poly(ctx, [project(u0, v1, z), project(u1, v1, z), r1, r0], base);                 // front slope
   poly(ctx, [project(u1, v0, z), project(u1, v1, z), r1], shade(wall, -20));         // gable end, shaded wall
-  ctx.strokeStyle = shade(base, -30); ctx.lineWidth = 1;
-  ctx.beginPath(); ctx.moveTo(Math.round(r0.x), Math.round(r0.y)); ctx.lineTo(Math.round(r1.x), Math.round(r1.y)); ctx.stroke();
+  // tile courses on the front slope, a lit ridge, verge boards on the gable and a dark eave
+  const e0 = project(u0, v1, z), e1 = project(u1, v1, z);
+  for (const f of [.22, .44, .66, .86]) pxLine(ctx, lerp(e0, r0, f), lerp(e1, r1, f), shade(base, -12));
+  pxLine(ctx, r0, r1, shade(base, 30));
+  pxLine(ctx, e1, r1, shade(base, -34)); pxLine(ctx, project(u1, v0, z), r1, shade(base, -34));
+  if (rise > 10) { const vent = lerp(project(u1, vm, z), r1, .45); ctx.fillStyle = shade(wall, -46); ctx.fillRect(Math.round(vent.x) - 1, Math.round(vent.y) - 1, 2, 3); }
+  pxLine(ctx, e0, e1, shade(base, -44));
 }
 
 /** A cylinder (towers, the treasury drum). Slices shade from their unit normal and fill near-last. */

@@ -1,4 +1,4 @@
-import { CART, CHEST, GRID, NATIVE_H, NATIVE_W, box, cone, contactShadow, cylinder, dome, flag, gableRoof, hipRoof, onLit, onShade, person, poly, project, shade, sprite, tree, type P } from "./engine";
+import { BLOCK, CART, CHEST, G0, GRID, NATIVE_H, NATIVE_W, at, balustrade, box, quoins, pxLine, cone, contactShadow, cylinder, dome, flag, gableRoof, hipRoof, onLit, onShade, person, poly, project, shade, sprite, tree, type P } from "./engine";
 
 /* Palettes per landmark, sharing one gold accent so the kingdom reads as one place. */
 const GOLD = "#e8b02a";
@@ -6,7 +6,7 @@ const STONE = { wall: "#c9c3b6", keep: "#d4cec2", trim: "#a8a191", slot: "#3a353
 const MARBLE = { base: "#ece6da", column: "#f4f0e6", cella: "#e2dbcc", roof: "#143b8c", door: "#4e3d2c" };
 const TIMBER = { wall: "#efe2c6", beam: "#6a4a2c", roof: "#b5523b", glow: "#ffd98a" };
 const HOUSE_ROOFS = ["#3b6fd4", "#c4553b", "#2f8f83", "#7a5aa8", "#d08a2b", "#4a7fc0", "#b0463f", "#3f8f5a"];
-const HOUSE_WALL = "#f2eee4";
+const HOUSE_WALLS = ["#f2eee4", "#f1e4cf", "#e6ecf0", "#f3e3da", "#ebe9dc"];
 const SEA_Z = -26;
 
 export type Verdict = "VERIFIED" | "FAILED" | "INCONCLUSIVE";
@@ -23,10 +23,24 @@ export type SceneState = {
 export type Landmark = "castle" | "treasury" | "guild";
 /** Footprint and height of each landmark, for clicks, hover glow and the quest marker. */
 const LANDMARKS: Record<Landmark, { u0: number; v0: number; u1: number; v1: number; top: number }> = {
-  castle: { u0: 1.6, v0: 4.4, u1: 5.4, v1: 7.6, top: 92 },
-  treasury: { u0: 6.8, v0: 4.4, u1: 10.8, v1: 8.4, top: 128 },
-  guild: { u0: 12, v0: 5, u1: 15, v1: 7.6, top: 70 },
+  castle: { u0: 1.6, v0: 1.9, u1: 5.4, v1: 5.1, top: 92 },
+  treasury: { u0: 7.5, v0: 1.2, u1: 11.5, v1: 5.7, top: 128 },
+  guild: { u0: 14, v0: 2.2, u1: 17, v1: 4.8, top: 70 },
 };
+/**
+ * The town plan. Roads run every BLOCK tiles; each block has one purpose. Landmarks were
+ * authored at their old positions and are placed into their blocks with an offset.
+ */
+const PLACE = { castle: [0, -2.5], treasury: [.7, -3.2], guild: [2, -2.8], market: [1.1, -1.8], mill: [5.9, 1.1], harbour: [6.6, 0] } as const;
+type Block = [number, number];
+const blockBase = (b: number) => b * BLOCK + 1;
+/** Four house plots per block, on an even grid with the same gap everywhere. */
+const plotsIn = ([bu, bv]: Block): Array<[number, number]> => [[.55, .55], [2.95, .55], [.55, 2.95], [2.95, 2.95]].map(([du, dv]) => [blockBase(bu) + du, blockBase(bv) + dv]);
+/** Where delivered pages are built, nearest the market first. */
+export const PLOTS: Array<[number, number]> = [[0, 1], [2, 1], [1, 2]].flatMap(b => plotsIn(b as Block));
+const HOUSE_BLOCKS: Block[] = [[-1, 0], [-1, 1], [-1, 3], [0, 2], [2, 2], [0, 3], [2, 3]];
+const PARKS: Block[] = [[-1, 2], [1, 3], [3, 1]];
+const inBlock = (u: number, v: number, [bu, bv]: Block) => u >= blockBase(bu) && u < blockBase(bu) + 5 && v >= blockBase(bv) && v < blockBase(bv) + 5;
 export function landmarkBounds(l: Landmark) {
   const b = LANDMARKS[l];
   const left = project(b.u0, b.v1), right = project(b.u1, b.v0), bottom = project(b.u1, b.v1), top = project((b.u0 + b.u1) / 2, (b.v0 + b.v1) / 2, b.top);
@@ -53,8 +67,10 @@ function hoverGlow(ctx: CanvasRenderingContext2D, l: Landmark) {
 
 /* ── terrain (static, rendered once and cached) ── */
 const isRoad = (u: number, v: number) =>
-  (v === 8 && u >= 1 && u <= 16) || (u === 8 && v >= 8 && v <= 12) || (v === 12 && u >= 1 && u <= 16) || (v === 15 && u >= 15 && u <= 17);
-const isField = (u: number, v: number) => u >= 11 && u <= 14 && v >= 0 && v <= 3;
+  (((u % BLOCK === 0 && u > G0) && v > G0) || ((v % BLOCK === 0 && v > G0) && u > G0)) || (v === 15 && u >= 19 && u <= 23);
+const isPlaza = (u: number, v: number) => inBlock(u, v, [1, 1]);
+const isPond = (u: number, v: number) => PARKS.some(([bu, bv]) => u >= blockBase(bu) + 1 && u <= blockBase(bu) + 3 && v >= blockBase(bv) + 1 && v <= blockBase(bv) + 3);
+const isField = (u: number, v: number) => ([[-1, -1], [0, -1], [1, -1]] as Block[]).some(b => inBlock(u, v, b)) || (inBlock(u, v, [3, 0]) && !(u >= 20 && u <= 22 && v >= 2 && v <= 4));
 const hash = (a: number, b: number) => { const x = Math.sin(a * 127.1 + b * 311.7) * 43758.5453; return x - Math.floor(x); };
 
 let terrainCache: HTMLCanvasElement | null = null;
@@ -63,20 +79,27 @@ function terrain(): HTMLCanvasElement {
   const c = document.createElement("canvas");
   c.width = NATIVE_W; c.height = NATIVE_H;
   const ctx = c.getContext("2d")!;
-  // cliffs with strata
-  poly(ctx, [project(0, GRID), project(GRID, GRID), project(GRID, GRID, SEA_Z), project(0, GRID, SEA_Z)], "#9a7148");
-  poly(ctx, [project(GRID, 0), project(GRID, GRID), project(GRID, GRID, SEA_Z), project(GRID, 0, SEA_Z)], "#7a5734");
+  const span = GRID - G0;
+  // a sandy beach along the far shores, then cliffs with strata along the near ones
+  poly(ctx, [project(G0 - .45, G0 - .45), project(GRID + .2, G0 - .45), project(GRID, GRID), project(G0 - .45, GRID + .2)], "#e6d3a0");
+  poly(ctx, [project(G0 - .2, G0 - .2), project(GRID, G0 - .2), project(GRID, GRID), project(G0 - .2, GRID)], "#d8c38d");
+  poly(ctx, [project(G0, GRID), project(GRID, GRID), project(GRID, GRID, SEA_Z), project(G0, GRID, SEA_Z)], "#9a7148");
+  poly(ctx, [project(GRID, G0), project(GRID, GRID), project(GRID, GRID, SEA_Z), project(GRID, G0, SEA_Z)], "#7a5734");
   for (const z of [-9, -17]) {
-    poly(ctx, [project(0, GRID, z), project(GRID, GRID, z), project(GRID, GRID, z - 2), project(0, GRID, z - 2)], "#86603b");
-    poly(ctx, [project(GRID, 0, z), project(GRID, GRID, z), project(GRID, GRID, z - 2), project(GRID, 0, z - 2)], "#664a2c");
+    poly(ctx, [project(G0, GRID, z), project(GRID, GRID, z), project(GRID, GRID, z - 2), project(G0, GRID, z - 2)], "#86603b");
+    poly(ctx, [project(GRID, G0, z), project(GRID, GRID, z), project(GRID, GRID, z - 2), project(GRID, G0, z - 2)], "#664a2c");
   }
-  for (let i = 0; i < 40; i++) { const t = hash(i, 4); const p = i % 2 ? project(t * GRID, GRID, -4 - hash(i, 8) * 18) : project(GRID, t * GRID, -4 - hash(i, 8) * 18); ctx.fillStyle = i % 2 ? "#b08559" : "#8d6740"; ctx.fillRect(Math.round(p.x), Math.round(p.y), 2, 1); }
-  for (let v = 0; v < GRID; v++) for (let u = 0; u < GRID; u++) {
+  for (let i = 0; i < 80; i++) { const t = G0 + hash(i, 4) * span; const p = i % 2 ? project(t, GRID, -4 - hash(i, 8) * 18) : project(GRID, t, -4 - hash(i, 8) * 18); ctx.fillStyle = i % 2 ? "#b08559" : "#8d6740"; ctx.fillRect(Math.round(p.x), Math.round(p.y), 2, 1); }
+  for (let v = G0; v < GRID; v++) for (let u = G0; u < GRID; u++) {
     const quad = [project(u, v), project(u + 1, v), project(u + 1, v + 1), project(u, v + 1)];
     if (isRoad(u, v)) {
       poly(ctx, quad, (u + v) % 2 ? "#d3cab8" : "#cdc4b1");
       ctx.fillStyle = "#b9af9a";
       for (let k = 0; k < 6; k++) { const p = project(u + hash(u, v + k) * .8 + .1, v + hash(v, u + k) * .8 + .1); ctx.fillRect(Math.round(p.x), Math.round(p.y), 2, 1); }
+    } else if (isPlaza(u, v)) {
+      poly(ctx, quad, (u + v) % 2 ? "#e2dacb" : "#ddd4c3");
+      ctx.fillStyle = "#c9bfac";
+      for (let k = 1; k < 4; k++) { const a1 = project(u + k / 4, v), b1 = project(u + k / 4, v + 1); ctx.fillRect(Math.round((a1.x + b1.x) / 2), Math.round((a1.y + b1.y) / 2), 1, 1); }
     } else if (isField(u, v)) {
       poly(ctx, quad, "#9b7449");
       for (let r = .15; r < 1; r += .25) { const a = project(u + r, v + .08), b = project(u + r, v + .92); ctx.strokeStyle = (u + v) % 2 ? "#d9b84a" : "#7fb84e"; ctx.lineWidth = 2; ctx.beginPath(); ctx.moveTo(a.x, a.y); ctx.lineTo(b.x, b.y); ctx.stroke(); }
@@ -86,14 +109,25 @@ function terrain(): HTMLCanvasElement {
       if (hash(u * 3, v * 5) > .93) { const p = project(u + .5, v + .5); ["#ff6f91", "#ffd15c", "#ffffff"].forEach((col, i) => { ctx.fillStyle = col; ctx.fillRect(Math.round(p.x) + i * 3 - 3, Math.round(p.y) + (i % 2), 1, 1); }); }
     }
   }
+  // each park's pond as one body of water: a sandy bank, the water, a darker rim and a few glints
+  for (const [bu, bv] of PARKS) {
+    const a0 = blockBase(bu) + 1, b0 = blockBase(bv) + 1, a1 = a0 + 3, b1 = b0 + 3;
+    poly(ctx, [project(a0 - .15, b0 - .15), project(a1 + .15, b0 - .15), project(a1 + .15, b1 + .15), project(a0 - .15, b1 + .15)], "#dcc893");
+    poly(ctx, [project(a0 + .1, b0 + .1), project(a1 - .1, b0 + .1), project(a1 - .1, b1 - .1), project(a0 + .1, b1 - .1)], "#3f8ccc");
+    poly(ctx, [project(a0 + .1, b0 + .1), project(a1 - .1, b0 + .1), project(a1 - .35, b0 + .35), project(a0 + .35, b0 + .35)], "#2f78b6");
+    poly(ctx, [project(a0 + .1, b0 + .1), project(a0 + .35, b0 + .35), project(a0 + .35, b1 - .35), project(a0 + .1, b1 - .1)], "#2c70aa");
+    ctx.fillStyle = "rgba(255,255,255,.5)";
+    for (let k = 0; k < 5; k++) { const p = project(a0 + .6 + hash(k, bu) * 1.8, b0 + .6 + hash(k, bv) * 1.8); ctx.fillRect(Math.round(p.x) - 2, Math.round(p.y), 5, 1); }
+    const lily = project(a0 + 2.1, b0 + .9); ctx.fillStyle = "#5fae4a"; ctx.fillRect(Math.round(lily.x), Math.round(lily.y), 3, 2); ctx.fillStyle = "#ff8fb1"; ctx.fillRect(Math.round(lily.x) + 1, Math.round(lily.y), 1, 1);
+  }
   ctx.strokeStyle = "rgba(120,104,80,.55)"; ctx.lineWidth = 1;
-  for (let v = 0; v < GRID; v++) for (let u = 0; u < GRID; u++) {
+  for (let v = G0; v < GRID; v++) for (let u = G0; u < GRID; u++) {
     if (!isRoad(u, v)) continue;
     const edges: Array<[number, number, number, number, boolean]> = [[u, v, u + 1, v, !isRoad(u, v - 1)], [u, v + 1, u + 1, v + 1, !isRoad(u, v + 1)], [u, v, u, v + 1, !isRoad(u - 1, v)], [u + 1, v, u + 1, v + 1, !isRoad(u + 1, v)]];
     for (const [a, b, cc, d, on] of edges) if (on) { const p = project(a, b), q = project(cc, d); ctx.beginPath(); ctx.moveTo(p.x, p.y); ctx.lineTo(q.x, q.y); ctx.stroke(); }
   }
   ctx.strokeStyle = "#5f9e3a"; ctx.lineWidth = 2;
-  ctx.beginPath(); const a = project(0, GRID), b = project(GRID, GRID), cc = project(GRID, 0);
+  ctx.beginPath(); const a = project(G0, GRID), b = project(GRID, GRID), cc = project(GRID, G0);
   ctx.moveTo(a.x, a.y); ctx.lineTo(b.x, b.y); ctx.lineTo(cc.x, cc.y); ctx.stroke();
   terrainCache = c;
   return c;
@@ -122,7 +156,7 @@ function sea(ctx: CanvasRenderingContext2D, t: number) {
 function foam(ctx: CanvasRenderingContext2D, t: number) {
   const phase = Math.floor(t / 260) % 4;
   ctx.fillStyle = "rgba(255,255,255,.75)";
-  for (let i = 0; i < GRID * 4; i++) {
+  for (let i = G0 * 4; i < GRID * 4; i++) {
     if ((i + phase) % 4 === 0) continue;
     const p = project(i / 4, GRID + .12, SEA_Z), q = project(GRID + .12, i / 4, SEA_Z);
     ctx.fillRect(Math.round(p.x), Math.round(p.y) + 1, 3, 1);
@@ -193,17 +227,24 @@ function castle(ctx: CanvasRenderingContext2D, t: number) {
     cylinder(ctx, cu, cv, .5, 0, h, STONE.wall);
     for (let z = 8; z < h - 4; z += 8) for (let i = 0; i < 6; i++) { const a = -.4 + i * .55; if (Math.cos(a) + Math.sin(a) < .2) continue; const p = project(cu + .5 * Math.cos(a), cv + .5 * Math.sin(a), z); ctx.fillStyle = STONE.course; ctx.fillRect(Math.round(p.x), Math.round(p.y), 2, 1); }
     for (const a of [.25, 1.3]) { const p = project(cu + .5 * Math.cos(a), cv + .5 * Math.sin(a), h - 6); ctx.fillStyle = STONE.slot; ctx.fillRect(Math.round(p.x), Math.round(p.y) - 6, 1, 4); }
+    for (const [a, z] of [[.9, h * .5], [.35, h * .28]] as Array<[number, number]>) { const p = project(cu + .5 * Math.cos(a), cv + .5 * Math.sin(a), z); const x = Math.round(p.x) - 1, y = Math.round(p.y) - 7; ctx.fillStyle = shade(STONE.wall, -30); ctx.fillRect(x - 1, y - 1, 5, 9); ctx.fillStyle = "#ffd98a"; ctx.fillRect(x, y + 1, 3, 6); ctx.fillRect(x + 1, y, 1, 1); ctx.fillStyle = STONE.trim; ctx.fillRect(x - 1, y + 7, 5, 1); }
+    cylinder(ctx, cu, cv, .52, h - 3, h, shade(STONE.wall, -20));
     cylinder(ctx, cu, cv, .58, h, h + 4, STONE.keep);
-    cone(ctx, cu, cv, .64, h + 4, 30, STONE.roof);
+    cylinder(ctx, cu, cv, .62, h + 4, h + 5, GOLD);
+    cone(ctx, cu, cv, .64, h + 5, 30, STONE.roof);
     const tip = project(cu, cv, h + 34); ctx.fillStyle = GOLD; ctx.fillRect(Math.round(tip.x), Math.round(tip.y) - 2, 1, 2);
   };
   tower(2, 4.8);
   box(ctx, 2, 4.8, 5, 7.2, 0, 30, { base: STONE.wall });
   courses(ctx, 2, 4.8, 5, 7.2, 0, 30, STONE.course);
+  onLit(ctx, 7.2, 2, 5, 27, 30, shade(STONE.wall, -18)); onShade(ctx, 5, 4.8, 7.2, 27, 30, shade(STONE.wall, -36));
+  onLit(ctx, 7.2, 2, 5, 0, 3, shade(STONE.wall, -26)); onShade(ctx, 5, 4.8, 7.2, 0, 3, shade(STONE.wall, -42));
   for (let u = 2.1; u < 4.95; u += .42) box(ctx, u, 7.0, u + .22, 7.2, 30, 35, { base: STONE.wall });
   for (let v = 4.9; v < 7.15; v += .42) box(ctx, 4.8, v, 5, v + .22, 30, 35, { base: STONE.wall });
   box(ctx, 3, 5.4, 4.4, 6.6, 0, 58, { base: STONE.keep });
   courses(ctx, 3, 5.4, 4.4, 6.6, 30, 58, shade(STONE.keep, -10));
+  quoins(ctx, 4.4, 6.6, 31, 56, shade(STONE.keep, 8), .12);
+  onLit(ctx, 6.6, 3, 4.4, 55, 58, shade(STONE.keep, -16)); onShade(ctx, 4.4, 5.4, 6.6, 55, 58, shade(STONE.keep, -34));
   for (let u = 3.05; u < 4.35; u += .36) box(ctx, u, 6.42, u + .2, 6.6, 58, 63, { base: STONE.keep });
   for (let v = 5.45; v < 6.55; v += .36) box(ctx, 4.22, v, 4.4, v + .2, 58, 63, { base: STONE.keep });
   [[3.4, 3.62], [3.85, 4.07]].forEach(([a, b]) => { onLit(ctx, 6.6, a, b, 40, 50, "#ffd98a"); onLit(ctx, 6.6, a - .03, b + .03, 50, 52, STONE.trim); });
@@ -241,7 +282,8 @@ function treasury(ctx: CanvasRenderingContext2D, s: SceneState, t: number) {
   const tc = project(8.825, 7.9, 67); ctx.fillStyle = GOLD; ctx.beginPath(); ctx.arc(tc.x, tc.y, 3, 0, Math.PI * 2); ctx.fill();
   cylinder(ctx, 8.8, 6.35, .8, 60, 66, MARBLE.base);
   for (let i = 0; i < 12; i++) { const a = i * Math.PI / 6; if (Math.cos(a) + Math.sin(a) < 0) continue; box(ctx, 8.8 + .8 * Math.cos(a) - .04, 6.35 + .8 * Math.sin(a) - .04, 8.8 + .8 * Math.cos(a) + .04, 6.35 + .8 * Math.sin(a) + .04, 60, 66, { base: MARBLE.column }); }
-  dome(ctx, 8.8, 6.35, .72, 66, 30, GOLD);
+  dome(ctx, 8.8, 6.35, .72, 66, 30, GOLD, 16);
+  for (const a of [.2, .75, 1.3]) for (let k = 0; k < 14; k++) { const f = k / 14, rr = .72 * Math.cos(f * Math.PI / 2), z = 66 + 30 * Math.pow(Math.sin(f * Math.PI / 2), .78); const p = project(8.8 + rr * Math.cos(a), 6.35 + rr * Math.sin(a), z); ctx.fillStyle = "#c98f12"; ctx.fillRect(Math.round(p.x), Math.round(p.y), 1, 2); }
   cylinder(ctx, 8.8, 6.35, .12, 96, 104, GOLD);
   const tip = project(8.8, 6.35, 104); flag(ctx, tip.x, tip.y, "#003087", t, 14);
   if (s.held) {
@@ -272,6 +314,7 @@ function guild(ctx: CanvasRenderingContext2D, t: number) {
   [[12.55, 13.0], [13.9, 14.35]].forEach(([a, b]) => { onLit(ctx, 7.35, a, b, 22, 30, TIMBER.glow); onLit(ctx, 7.35, a, b, 21, 22, TIMBER.beam); onLit(ctx, 7.35, (a + b) / 2 - .02, (a + b) / 2 + .02, 22, 30, TIMBER.beam); });
   onLit(ctx, 7.35, 13.25, 13.7, 3, 16, "#5a3c22"); onLit(ctx, 7.35, 13.2, 13.75, 16, 18, TIMBER.beam);
   onShade(ctx, 14.75, 5.7, 6.2, 22, 30, shade(TIMBER.glow, -12)); onShade(ctx, 14.75, 6.6, 7.0, 22, 30, shade(TIMBER.glow, -12));
+  onLit(ctx, 7.35, 12.25, 14.75, 3, 4, "#e8b02a"); onShade(ctx, 14.75, 5.25, 7.35, 3, 4, "#b98a1e");
   gableRoof(ctx, 12, 5, 15, 7.6, 34, 26, TIMBER.roof, TIMBER.wall);
   box(ctx, 14.05, 5.55, 14.45, 5.95, 40, 66, { base: "#9a8a7a" });
   box(ctx, 14.0, 5.5, 14.5, 6.0, 64, 67, { base: "#857565" });
@@ -309,36 +352,85 @@ function stall(ctx: CanvasRenderingContext2D, u0: number, v0: number, color: str
   for (let k = 0; k < n; k++) gableRoof(ctx, u0 - .1 + k * w, v0 - .1, u0 - .1 + (k + 1) * w, v1 + .1, 16, 7, k % 2 ? "#f3ead6" : color, "#f3ead6");
 }
 
+const HOUSE_BASE = 6.5, STOREY = 12;
+const houseTop = (h: House) => HOUSE_BASE + h.floors * STOREY;
+const houseRise = (h: House) => 10 + h.s * 5;
+/**
+ * A town house built the way the capitol blocks are: a rusticated plinth with a cap, storeys
+ * divided into bays by pilasters, windows with frames, heads and sills, a door bay with a stoop,
+ * a projecting cornice, and either a pitched roof or a set-back attic behind a balustrade.
+ */
 function house(ctx: CanvasRenderingContext2D, h: House, i: number, s: SceneState, t: number) {
-  const u0 = h.u, v0 = h.v, u1 = h.u + h.s, v1 = h.v + h.s, wallTop = 8 + h.floors * 13, roof = HOUSE_ROOFS[i % HOUSE_ROOFS.length];
-  box(ctx, u0, v0, u1, v1, 0, wallTop, { base: HOUSE_WALL });
-  onLit(ctx, v1, u0, u1, 0, 4, "#2c4f8f"); onShade(ctx, u1, v0, v1, 0, 4, "#22406f");
-  const lit = s.visited.has(h.path);
-  const glass = lit ? "#ffe39a" : "#86b6e8", glassShade = lit ? "#e8c46a" : "#6a95c4";
-  const n = Math.max(2, Math.round(h.s * 2));
+  const u0 = h.u, v0 = h.v, u1 = h.u + h.s, v1 = h.v + h.s;
+  const wall = HOUSE_WALLS[i % HOUSE_WALLS.length], roof = HOUSE_ROOFS[i % HOUSE_ROOFS.length], kind = i % 3;
+  const top = houseTop(h), base = HOUSE_BASE;
+  // plinth: dressed stone with two joint courses, then a projecting cap
+  box(ctx, u0, v0, u1, v1, 0, 5, { base: "#b8ae9c" });
+  for (const z of [1.7, 3.4]) { onLit(ctx, v1, u0, u1, z, z + .6, "#a39a88"); onShade(ctx, u1, v0, v1, z, z + .6, "#857d6e"); }
+  box(ctx, u0 - .05, v0 - .05, u1 + .05, v1 + .05, 5, base, { base: "#ddd5c4", finish: false });
+  // the storeys
+  box(ctx, u0, v0, u1, v1, base, top, { base: wall });
+  const n = Math.max(2, Math.round(h.s * 1.7)), bay = h.s / n;
+  const lit = !!h.path && s.visited.has(h.path);
+  const glass = lit ? "#ffe39a" : "#7fb0e4", glassShade = lit ? "#e8c46a" : "#5f8fc4";
+  for (let k = 0; k <= n; k++) {
+    const c = u0 + bay * k, d = v0 + bay * k;
+    onLit(ctx, v1, Math.max(u0, c - .05), Math.min(u1, c + .05), base, top, shade(wall, 12));
+    onLit(ctx, v1, Math.min(u1, c + .035), Math.min(u1, c + .05), base, top, shade(wall, -16));
+    onShade(ctx, u1, Math.max(v0, d - .05), Math.min(v1, d + .05), base, top, shade(wall, -12));
+  }
+  for (let f = 1; f < h.floors; f++) { onLit(ctx, v1, u0, u1, base + f * STOREY - 1, base + f * STOREY, shade(wall, -12)); onShade(ctx, u1, v0, v1, base + f * STOREY - 1, base + f * STOREY, shade(wall, -32)); }
   for (let f = 0; f < h.floors; f++) {
-    const z0 = 8 + f * 13, z1 = z0 + 7;
+    const z0 = base + f * STOREY + 3, z1 = z0 + 6.5;
     for (let k = 0; k < n; k++) {
-      const a = u0 + (h.s / n) * (k + .28), b = a + (h.s / n) * .44;
+      const a = u0 + bay * (k + .28), b = u0 + bay * (k + .72), c = v0 + bay * (k + .28), d = v0 + bay * (k + .72);
       if (f === 0 && k === Math.floor(n / 2)) {
-        onLit(ctx, v1, a - .03, b + .03, 0, 13, "#8a6a44"); onLit(ctx, v1, a, b, 0, 11, "#5a3c22");
-        const step = project((a + b) / 2, v1 + .06); ctx.fillStyle = "#b9b2a3"; ctx.fillRect(Math.round(step.x) - 3, Math.round(step.y) - 1, 7, 2);
-        continue;
+        onLit(ctx, v1, a - .03, b + .03, base, base + 10.5, shade(wall, -30));
+        onLit(ctx, v1, a, b, base, base + 9, "#5a3c22"); onLit(ctx, v1, (a + b) / 2 - .008, (a + b) / 2 + .008, base, base + 9, "#3f2a17");
+        onLit(ctx, v1, a, b, base + 9, base + 10, glass);
+        box(ctx, a - .06, v1, b + .06, v1 + .16, 0, base - .5, { base: "#cfc6b4", lit: "#a39a88", finish: false });
+        const lamp = project(b + .09, v1, base + 8); ctx.fillStyle = "#3a3f4a"; ctx.fillRect(Math.round(lamp.x), Math.round(lamp.y) - 1, 1, 2); ctx.fillStyle = "#ffd98a"; ctx.fillRect(Math.round(lamp.x), Math.round(lamp.y) + 1, 1, 2);
+      } else {
+        onLit(ctx, v1, a - .025, b + .025, z0 - .6, z1 + .6, shade(wall, -32));
+        onLit(ctx, v1, a, b, z0, z1, glass); onLit(ctx, v1, a, b, z1 - 1.6, z1, shade(glass, -26));
+        onLit(ctx, v1, (a + b) / 2 - .008, (a + b) / 2 + .008, z0, z1, shade(wall, 6));
+        onLit(ctx, v1, a - .05, b + .05, z0 - 1.6, z0 - .6, "#fffaf0");
+        if (f === 0 && (k + i) % 2 === 0) { onLit(ctx, v1, a, b, z0 - 3, z0 - 1.6, "#9a5b3a"); onLit(ctx, v1, a + .02, b - .02, z0 - 2.2, z0 - 1.6, (k + i) % 4 ? "#e0607e" : "#ffd15c"); }
       }
-      onLit(ctx, v1, a, b, z0, z1, glass); onLit(ctx, v1, (a + b) / 2 - .01, (a + b) / 2 + .01, z0, z1, "#d9d3c4"); onLit(ctx, v1, a - .03, b + .03, z0 - 1, z0, "#b7b1a3");
-      if ((k + f + i) % 3 === 0) onLit(ctx, v1, a, b, z0 - 3, z0 - 1, "#e0607e");
-      const c = v0 + (h.s / n) * (k + .28), d = c + (h.s / n) * .44;
-      onShade(ctx, u1, c, d, z0, z1, glassShade); onShade(ctx, u1, c - .03, d + .03, z0 - 1, z0, "#a39d90");
+      onShade(ctx, u1, c - .025, d + .025, z0 - .6, z1 + .6, shade(wall, -44));
+      onShade(ctx, u1, c, d, z0, z1, glassShade); onShade(ctx, u1, c, d, z1 - 1.6, z1, shade(glassShade, -24));
+      onShade(ctx, u1, c - .05, d + .05, z0 - 1.6, z0 - .6, shade(wall, -10));
     }
   }
-  box(ctx, u0 - .06, v0 - .06, u1 + .06, v1 + .06, wallTop, wallTop + 2, { base: shade(HOUSE_WALL, -6) });
-  const rise = 12 + h.s * 5;
-  if (i % 3 === 1) gableRoof(ctx, u0 - .08, v0 - .08, u1 + .08, v1 + .08, wallTop + 2, rise, roof, HOUSE_WALL);
-  else hipRoof(ctx, u0 - .08, v0 - .08, u1 + .08, v1 + .08, wallTop + 2, rise, roof);
-  if (i % 2 === 0) box(ctx, u1 - .45, v0 + .15, u1 - .2, v0 + .4, wallTop + 2, wallTop + rise * .85, { base: "#b0a596" });
-  if (s.active === h.path) { const a = project((u0 + u1) / 2, (v0 + v1) / 2, wallTop + rise + 10); ctx.fillStyle = `rgba(255,214,90,${.5 + .4 * Math.sin(t / 160)})`; ctx.beginPath(); ctx.arc(a.x, a.y - 6, 3, 0, Math.PI * 2); ctx.fill(); }
-  const verdict = s.verdicts[h.path];
-  if (verdict) { const a = project((u0 + u1) / 2, (v0 + v1) / 2, wallTop + rise); flag(ctx, a.x, a.y, verdict === "VERIFIED" ? "#1f9e62" : verdict === "FAILED" ? "#d14343" : "#e0a400", t, 18); }
+  // cornice: a shadow line under it, then the projecting moulding
+  onLit(ctx, v1, u0, u1, top - 1.2, top, shade(wall, -26)); onShade(ctx, u1, v0, v1, top - 1.2, top, shade(wall, -44));
+  box(ctx, u0 - .1, v0 - .1, u1 + .1, v1 + .1, top, top + 2.5, { base: shade(wall, -5), finish: false });
+  pxLine(ctx, project(u0 - .1, v1 + .1, top + 2.5), project(u1 + .1, v1 + .1, top + 2.5), "#fffaf0");
+  if (kind === 2) {
+    box(ctx, u0 + .22, v0 + .22, u1 - .22, v1 - .22, top + 2.5, top + 8, { base: shade(wall, -6), top: roof });
+    balustrade(ctx, "v", v1 + .06, u0 - .06, u1 + .06, top + 2.5, "#efe9dd");
+    balustrade(ctx, "u", u1 + .06, v0 - .06, v1 + .06, top + 2.5, "#efe9dd");
+  } else {
+    const rise = houseRise(h);
+    if (kind === 1) gableRoof(ctx, u0 - .1, v0 - .1, u1 + .1, v1 + .1, top + 2.5, rise, roof, wall);
+    else hipRoof(ctx, u0 - .1, v0 - .1, u1 + .1, v1 + .1, top + 2.5, rise, roof);
+    if (i % 2 === 0) { box(ctx, u1 - .45, v0 + .15, u1 - .2, v0 + .4, top + 2.5, top + rise * .85, { base: "#b0a596" }); box(ctx, u1 - .48, v0 + .12, u1 - .17, v0 + .43, top + rise * .85, top + rise * .85 + 2, { base: "#8c8174" }); }
+  }
+  const crown = kind === 2 ? top + 10 : top + 2.5 + houseRise(h);
+  if (s.active && s.active === h.path) { const a = project((u0 + u1) / 2, (v0 + v1) / 2, crown + 10); ctx.fillStyle = `rgba(255,214,90,${.5 + .4 * Math.sin(t / 160)})`; ctx.beginPath(); ctx.arc(a.x, a.y - 6, 3, 0, Math.PI * 2); ctx.fill(); }
+  const verdict = h.path ? s.verdicts[h.path] : undefined;
+  if (verdict) { const a = project((u0 + u1) / 2, (v0 + v1) / 2, crown); flag(ctx, a.x, a.y, verdict === "VERIFIED" ? "#1f9e62" : verdict === "FAILED" ? "#d14343" : "#e0a400", t, 18); }
+}
+
+/** A harbour warehouse: brick walls, a loading door and a low gable. */
+function warehouse(ctx: CanvasRenderingContext2D, u0: number, v0: number) {
+  const u1 = u0 + 2.2, v1 = v0 + 1.4;
+  box(ctx, u0, v0, u1, v1, 0, 18, { base: "#b9785a" });
+  for (let z = 4; z < 18; z += 4) { onLit(ctx, v1, u0, u1, z, z + .6, "#a5664b"); onShade(ctx, u1, v0, v1, z, z + .6, "#7f4c37"); }
+  onLit(ctx, v1, u0 + .7, u0 + 1.5, 0, 11, "#4a3424"); onLit(ctx, v1, u0 + .7, u0 + 1.5, 11, 12, "#e8b02a");
+  onLit(ctx, v1, u0 + .2, u0 + .5, 12, 15, "#86b6e8"); onLit(ctx, v1, u0 + 1.7, u0 + 2, 12, 15, "#86b6e8");
+  gableRoof(ctx, u0 - .08, v0 - .08, u1 + .08, v1 + .08, 18, 9, "#6f7a86", "#b9785a");
+  [[u1 + .15, v1 - .4], [u1 + .15, v1 - .1]].forEach(([u, v]) => box(ctx, u, v, u + .28, v + .28, 0, 6, { base: "#b07a44" }));
 }
 
 function well(ctx: CanvasRenderingContext2D) {
@@ -350,8 +442,25 @@ function well(ctx: CanvasRenderingContext2D) {
 
 /* ── the frame ── */
 type Drawable = { depth: number; draw: () => void };
-const TREES: Array<[number, number]> = [[.7, .8], [2.6, .6], [5.6, 1.2], [8.8, .8], [16.8, .7], [.6, 3.2], [16.9, 6.2], [.6, 10.2], [16.7, 10.6], [.7, 15.2], [3.2, 16.7], [7.2, 16.6], [11.6, 16.7], [6.2, 3], [10.2, 2.8], [14.6, 16.8], [16.8, 12.8], [9.4, 16.8]];
-const VILLAGERS = [{ road: 8.5, speed: .045, phase: .1, tunic: "#c47a2c" }, { road: 12.5, speed: .038, phase: .55, tunic: "#7a5aa8" }, { road: 8.5, speed: .03, phase: .8, tunic: "#3f8f83" }];
+const TREES: Array<[number, number]> = (() => {
+  const t: Array<[number, number]> = [];
+  // the royal forest along the far shores
+  for (let v = G0 + .5; v < GRID; v += 1.2) for (let u = G0 + .5; u < GRID; u += 1.2) {
+    if (u >= -6 && v >= -6) continue;
+    const j = hash(Math.round(u * 10), Math.round(v * 10)); if (j > .18) t.push([u + j * .45, v + hash(Math.round(v * 7), Math.round(u * 3)) * .45]);
+  }
+  // orchards: fruit trees in straight rows
+  for (const [bu, bv] of [[2, -1], [3, -1]] as Block[]) for (let dv = .6; dv < 5; dv += 1.25) for (let du = .6; du < 5; du += 1.25) t.push([blockBase(bu) + du, blockBase(bv) + dv]);
+  // parks: a ring of trees around each pond
+  for (const [bu, bv] of PARKS) { const b0 = blockBase(bu), c0 = blockBase(bv); for (let k = .5; k < 5; k += 1) { t.push([b0 + k, c0 + .35], [b0 + .35, c0 + k]); if (k > 1) t.push([b0 + k, c0 + 4.6], [b0 + 4.6, c0 + k]); } }
+  // planters at the corners of the market square, and a coastal copse
+  t.push([7.35, 7.35], [11.65, 7.35], [7.35, 11.65], [11.65, 11.65]);
+  for (let k = 0; k < 9; k++) t.push([19.4 + hash(k, 1) * 4.2, 19.4 + hash(k, 2) * 4.2]);
+  return t.filter(([u, v]) => !isRoad(Math.floor(u), Math.floor(v)) && !isPond(Math.floor(u), Math.floor(v)));
+})();
+/** Townsfolk homes that make the other blocks real neighbourhoods; they carry no data. */
+const QUARTER: House[] = HOUSE_BLOCKS.flatMap(b => plotsIn(b)).map(([u, v], k) => ({ path: "", title: null, status: 200, u, v, s: 1.55 + hash(k, 5) * .15, floors: 1 + Math.round(hash(k, 9) * 1.4) }));
+const VILLAGERS = [{ road: .5, speed: .02, phase: .1, tunic: "#c47a2c" }, { road: 12.5, speed: .018, phase: .55, tunic: "#7a5aa8" }, { road: 6.5, speed: .016, phase: .8, tunic: "#3f8f83" }, { road: 18.5, speed: .017, phase: .3, tunic: "#b0463f" }, { road: -5.5, speed: .02, phase: .65, tunic: "#2f5fbe" }, { road: 12.5, speed: .014, phase: .2, tunic: "#d08a2b" }];
 
 export function drawScene(ctx: CanvasRenderingContext2D, s: SceneState, t: number) {
   sea(ctx, t);
@@ -359,45 +468,51 @@ export function drawScene(ctx: CanvasRenderingContext2D, s: SceneState, t: numbe
   ctx.drawImage(terrain(), 0, 0);
   foam(ctx, t);
   // contact shadows first, so no shadow paints over a neighbour
-  contactShadow(ctx, 1.6, 4.4, 5.4, 7.6); contactShadow(ctx, 6.8, 4.4, 10.8, 8.4); contactShadow(ctx, 12, 5, 15, 7.6);
+  for (const [key, u0, v0, u1, v1] of [["castle", 1.6, 4.4, 5.4, 7.6], ["treasury", 6.8, 4.4, 10.8, 8.4], ["guild", 12, 5, 15, 7.6]] as const) at(PLACE[key][0], PLACE[key][1], () => contactShadow(ctx, u0, v0, u1, v1));
+  const spare = PLOTS.slice(s.houses.length).map(([u, v], k) => ({ path: "", title: null, status: 200, u, v, s: 1.5, floors: 1 + (k % 2) }));
+  [...spare, ...QUARTER].forEach(h => contactShadow(ctx, h.u, h.v, h.u + h.s, h.v + h.s));
   if (s.hover) hoverGlow(ctx, s.hover);
   s.houses.forEach(h => contactShadow(ctx, h.u, h.v, h.u + h.s, h.v + h.s));
   const frame = (moving: boolean) => (moving ? Math.floor(t / 170) % 2 : 0) as 0 | 1;
+  const placed = (key: keyof typeof PLACE, depth: number, draw: () => void): Drawable => ({ depth: depth + PLACE[key][0] + PLACE[key][1], draw: () => at(PLACE[key][0], PLACE[key][1], draw) });
   const items: Drawable[] = [
-    { depth: 12.6, draw: () => castle(ctx, t) },
-    { depth: 18.8, draw: () => treasury(ctx, s, t) },
-    { depth: 22.6, draw: () => guild(ctx, t) },
-    { depth: 18.6, draw: () => windmill(ctx, t) },
-    { depth: 25, draw: () => well(ctx) },
-    { depth: 6.4 + 10.2 + 1.9, draw: () => stall(ctx, 6.4, 10.2, "#c4553b", ["#e05a3a", "#f2c14e", "#7fb84e"]) },
-    { depth: 9.2 + 10.2 + 1.9, draw: () => stall(ctx, 9.2, 10.2, "#2f6fdc", ["#9fd0ff", "#f2c14e", "#b07a44"]) },
-    { depth: 17.4 + 15.9, draw: () => pier(ctx) },
-    { depth: 21.3 + 14.4 + .6, draw: () => lighthouse(ctx, t) },
+    placed("castle", 12.6, () => castle(ctx, t)),
+    placed("treasury", 18.8, () => treasury(ctx, s, t)),
+    placed("guild", 22.6, () => guild(ctx, t)),
+    placed("mill", 18.6, () => windmill(ctx, t)),
+    placed("market", 25, () => well(ctx)),
+    placed("market", 6.4 + 10.2 + 1.9, () => stall(ctx, 6.4, 10.2, "#c4553b", ["#e05a3a", "#f2c14e", "#7fb84e"])),
+    placed("market", 9.2 + 10.2 + 1.9, () => stall(ctx, 9.2, 10.2, "#2f6fdc", ["#9fd0ff", "#f2c14e", "#b07a44"])),
+    placed("harbour", 17.4 + 15.9, () => pier(ctx)),
+    placed("harbour", 21.3 + 14.4 + .6, () => lighthouse(ctx, t)),
+    { depth: 19.5 + 13.3 + 3.6, draw: () => warehouse(ctx, 19.5, 13.3) },
+    { depth: 19.5 + 16.4 + 3.6, draw: () => warehouse(ctx, 19.5, 16.4) },
   ];
   s.houses.forEach((h, i) => items.push({ depth: h.u + h.v + 2 * h.s, draw: () => house(ctx, h, i, s, t) }));
+  [...spare, ...QUARTER].forEach((h, i) => items.push({ depth: h.u + h.v + 2 * h.s, draw: () => house(ctx, h, i + 5, s, t) }));
   TREES.forEach(([u, v], i) => items.push({ depth: u + v, draw: () => tree(ctx, u, v, i) }));
   // ships: the guild's galleon at the pier sails out carrying the gold once it is released
   const sailing = s.paid ? Math.min(1, (t - s.paidSince) / 9000) : 0;
-  const galleonU = 20.2 + sailing * 9, galleonV = 16.9 + sailing * 4;
+  const galleonU = 26.8 + sailing * 9, galleonV = 16.9 + sailing * 4;
   items.push({ depth: galleonU + galleonV, draw: () => ship(ctx, galleonU, galleonV, true, t, { cargo: s.paid, flagColor: "#1f9e62", hull: "#3d2a1c" }) });
   // two trading ships on loops that stay inside the visible sea, fading in and out at each end
   const voyage = (speed: number, offset: number, from: number, to: number) => { const f = ((t / 1000 * speed + offset) % (to - from)) / (to - from); return { at: from + f * (to - from), alpha: Math.min(1, f * 8, (1 - f) * 8) }; };
-  const a = voyage(.32, 0, 2, 24), b = voyage(.25, 11, 0, 22);
-  items.push({ depth: a.at + 21.5, draw: () => { ctx.globalAlpha = a.alpha; ship(ctx, a.at, 21.5, true, t, { flagColor: "#2f6fdc", hull: "#2a3348", scale: .85 }); ctx.globalAlpha = 1; } });
-  items.push({ depth: 23.2 + b.at, draw: () => { ctx.globalAlpha = b.alpha; ship(ctx, 23.2, b.at, false, t, { flagColor: "#c0392b", hull: "#4a2e22", scale: .75 }); ctx.globalAlpha = 1; } });
+  const a = voyage(.32, 0, -10, 30), b = voyage(.25, 11, -12, 26);
+  items.push({ depth: a.at + 27.5, draw: () => { ctx.globalAlpha = a.alpha; ship(ctx, a.at, 27.5, true, t, { flagColor: "#2f6fdc", hull: "#2a3348", scale: .85 }); ctx.globalAlpha = 1; } });
+  items.push({ depth: 29.8 + b.at, draw: () => { ctx.globalAlpha = b.alpha; ship(ctx, 29.8, b.at, false, t, { flagColor: "#c0392b", hull: "#4a2e22", scale: .75 }); ctx.globalAlpha = 1; } });
   // the people of the realm
-  items.push({ depth: 3.5 + 7.75, draw: () => { const p = project(3.5, 7.75); sprite(ctx, person("king", "#2f5fbe", 0), p.x, p.y); } });
-  items.push({ depth: 13.5 + 7.8, draw: () => { const p = project(13.5, 7.8); sprite(ctx, person("artisan", "#5a7d3a", 0), p.x, p.y, true); } });
+  items.push({ depth: 3.5 + 5.25, draw: () => { const p = project(3.5, 5.25); sprite(ctx, person("king", "#2f5fbe", 0), p.x, p.y); } });
+  items.push({ depth: 15.5 + 5, draw: () => { const p = project(15.5, 5); sprite(ctx, person("artisan", "#5a7d3a", 0), p.x, p.y, true); } });
   VILLAGERS.forEach(vl => {
-    const x = (t / 1000 * vl.speed + vl.phase) % 2, dir = x < 1 ? 1 : -1, u = 1.6 + 14.8 * (x < 1 ? x : 2 - x);
-    if (vl.road === 8.5 && Math.abs(u - s.cartU) < .8) return;
+    const x = (t / 1000 * vl.speed + vl.phase) % 2, dir = x < 1 ? 1 : -1, u = -11 + 34 * (x < 1 ? x : 2 - x);
+    if (vl.road === 6.5 && Math.abs(u - s.cartU) < .8) return;
     items.push({ depth: u + vl.road + .2, draw: () => { const p = project(u, vl.road + .2); sprite(ctx, person("artisan", vl.tunic, frame(true)), p.x, p.y, dir < 0); } });
   });
-  if (s.held) [[6.9, 8.6], [10.7, 8.6]].forEach(([u, v], i) => items.push({ depth: u + v, draw: () => {
+  if (s.held) [[7.6, 5.45], [11.4, 5.45]].forEach(([u, v], i) => items.push({ depth: u + v, draw: () => {
     const p = project(u, v); sprite(ctx, person("guard", "#c0392b", 0), p.x, p.y, i === 1);
     ctx.fillStyle = "#8a6a44"; ctx.fillRect(Math.round(p.x) + (i ? -5 : 5), Math.round(p.y) - 20, 1, 19); ctx.fillStyle = "#c9d3e3"; ctx.fillRect(Math.round(p.x) + (i ? -5 : 5), Math.round(p.y) - 23, 1, 3);
   } }));
-  items.push({ depth: s.cartU + 8.5, draw: () => { const p = project(s.cartU, 8.5); sprite(ctx, CART, p.x, p.y + (s.cartMoving && Math.floor(t / 140) % 2 ? -1 : 0)); } });
+  items.push({ depth: s.cartU + 6.5, draw: () => { const p = project(s.cartU, 6.5); sprite(ctx, CART, p.x, p.y + (s.cartMoving && Math.floor(t / 140) % 2 ? -1 : 0)); } });
   if (s.showCrew) s.inspectors.forEach(w => items.push({ depth: w.u + w.v, draw: () => {
     const p = project(w.u, w.v);
     ctx.fillStyle = "rgba(20,40,10,.25)"; ctx.beginPath(); ctx.ellipse(p.x + 1, p.y, 5, 2, 0, 0, Math.PI * 2); ctx.fill();
@@ -409,7 +524,7 @@ export function drawScene(ctx: CanvasRenderingContext2D, s: SceneState, t: numbe
 
 /** Screen-space box for a house, in native pixels, for clicks and labels. */
 export function houseBounds(h: House): { x0: number; x1: number; y0: number; y1: number; label: P } {
-  const wallTop = 8 + h.floors * 13, rise = 12 + h.s * 5;
+  const wallTop = houseTop(h) + 2.5, rise = houseRise(h);
   const left = project(h.u, h.v + h.s), right = project(h.u + h.s, h.v), bottom = project(h.u + h.s, h.v + h.s), apex = project(h.u + h.s / 2, h.v + h.s / 2, wallTop + rise);
   return { x0: left.x, x1: right.x, y0: apex.y, y1: bottom.y, label: { x: (left.x + right.x) / 2, y: bottom.y + 9 } };
 }

@@ -5,7 +5,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   ArrowLeft, ArrowRight, ArrowUpRight, Ban, Castle, Check, ChevronRight, CircleDollarSign, Clock3, Coins, CreditCard, ExternalLink, Eye, FileText, Fingerprint,
   Globe, Handshake, Heading1, History, Hourglass, Inbox, Link2Off, ListChecks, Lock, LogOut, Menu, MousePointerClick, PackageCheck,
-  Plus, RefreshCw, RotateCcw, SearchCheck, Send, ShieldAlert, TrendingDown, TrendingUp, Type, Undo2, Wallet, X,
+  Download, Link2, Plus, RefreshCw, RotateCcw, SearchCheck, Send, ShieldAlert, TrendingDown, TrendingUp, Type, Undo2, Wallet, X,
 } from "lucide-react";
 import "./dashboard.css";
 import PayPalCheckout from "./paypal-checkout";
@@ -244,6 +244,53 @@ function VaultScene({ project, audit, me }: { project: Project; audit: Event[]; 
   </div>;
 }
 
+/* ───────────────────────── the PayPal hold card ─────────────────────────
+ * Card layout and flip inspired by Muhammed Erdem's "Credit Card Form" (MIT licence).
+ * It collects nothing: it is a picture of this agreement's PayPal hold. The amount is real,
+ * the "number" is the terms fingerprint, the holder is who the money is held for, "valid thru"
+ * is the day PayPal's hold lapses, and the back carries the real PayPal order and capture IDs.
+ * Card details only ever go to PayPal's own checkout. */
+function HoldCard({ project }: { project: Project }) {
+  const [flipped, setFlipped] = useState(false);
+  const [tilt, setTilt] = useState({ x: 0, y: 0 });
+  const f = project.funding, held = isHeld(project), paid = isPaid(project);
+  const tone = paid ? "paid" : held ? "held" : ["VOIDED", "EXPIRED", "FAILED"].includes(f.status) ? "void" : "open";
+  const state = paid ? "Released" : held ? (f.status === "PENDING" ? "PayPal reviewing" : "Held by PayPal") : f.status === "VOIDED" ? "Hold cancelled" : f.status === "EXPIRED" ? "Hold expired" : f.status === "FAILED" ? "Declined" : f.mode === "HOLD" ? "Not secured yet" : project.status === "APPROVED" ? "Ready to pay" : "Pays on approval";
+  const digits = `${project.consent.fingerprint || ""}${project.id}`.replace(/[^a-z0-9]/gi, "").toUpperCase().slice(0, 16);
+  const thru = paid ? "PAID" : f.expiresAt ? new Date(f.expiresAt).toLocaleDateString("en-US", { month: "2-digit", day: "2-digit" }) : "--/--";
+  const move = (e: React.PointerEvent<HTMLButtonElement>) => {
+    if (e.pointerType !== "mouse" || reducedMotion()) return;
+    const r = e.currentTarget.getBoundingClientRect();
+    setTilt({ x: (e.clientX - r.left) / r.width * 2 - 1, y: (e.clientY - r.top) / r.height * 2 - 1 });
+  };
+  const style = { ["--rx" as string]: `${(-tilt.y * 5).toFixed(2)}deg`, ["--ry" as string]: `${(tilt.x * 7).toFixed(2)}deg`, ["--gx" as string]: `${50 + tilt.x * 40}%`, ["--gy" as string]: `${50 + tilt.y * 40}%` };
+  return <button type="button" className={`d-hc t-${tone} ${flipped ? "flip" : ""}`} style={style} onClick={() => setFlipped(!flipped)} onPointerMove={move} onPointerLeave={() => setTilt({ x: 0, y: 0 })}
+    aria-label={`PayPal hold card: ${state}, ${money(project.amount_cents)}. ${flipped ? "Showing PayPal references." : "Flip for PayPal references."}`}>
+    <span className="d-hc-inner">
+      <span className="d-hc-face d-hc-front" aria-hidden={flipped}>
+        <span className="d-hc-shine" />
+        <span className="d-hc-row"><span className="d-hc-chip"><i /><i /><i /><i /></span><span className="d-hc-wave"><i /><i /><i /></span><img src="/paypal-logo.webp" alt="" className="d-hc-pp" /></span>
+        <span className="d-hc-amt">{money(project.amount_cents)}<small>USD</small></span>
+        <span className="d-hc-num">{digits.match(/.{4}/g)!.map((g, i) => <span key={i}>{g}</span>)}</span>
+        <span className="d-hc-row d-hc-foot">
+          <span><small>Held for</small><b>{handle(project.freelancer_email)}</b></span>
+          <span><small>Valid thru</small><b>{thru}</b></span>
+          <span className="d-hc-state">{state}</span>
+        </span>
+      </span>
+      <span className="d-hc-face d-hc-back" aria-hidden={!flipped}>
+        <span className="d-hc-stripe" />
+        <span className="d-hc-sig"><span>{project.title}</span><b>{(project.paypal_capture_id || project.paypal_order_id || "------").slice(-6)}</b></span>
+        <span className="d-hc-refs">
+          <span><small>PayPal order</small><b>{project.paypal_order_id || "Not opened yet"}</b></span>
+          <span><small>Capture</small><b>{project.paypal_capture_id || "After approval"}</b></span>
+        </span>
+        <span className="d-hc-fine">A picture of the PayPal hold. Card details never touch SavePal.</span>
+      </span>
+    </span>
+  </button>;
+}
+
 /* ───────────────────────── money card ───────────────────────── */
 function MoneyCard({ project, data, audit, busy, run }: { project: Project; data: WorkspaceData; audit: Event[]; busy: boolean; run: Run }) {
   const f = project.funding, held = isHeld(project), paid = isPaid(project), client = project.role === "client";
@@ -251,8 +298,8 @@ function MoneyCard({ project, data, audit, busy, run }: { project: Project; data
   const state = paid ? "Released" : held ? (f.status === "PENDING" ? "PayPal reviewing" : "Held by PayPal") : f.status === "VOIDED" ? "Hold cancelled" : f.status === "EXPIRED" ? "Hold expired" : f.status === "FAILED" ? "Declined" : f.mode === "HOLD" ? "Not secured yet" : project.status === "APPROVED" ? "Ready to pay" : "Paid after approval";
   const tone = paid ? "ok" : held ? "pp" : ["VOIDED", "EXPIRED", "FAILED"].includes(f.status) ? "bad" : "";
   return <section className="d-card d-money" aria-label="Payment">
-    <header className="d-money-head"><PayPalMark h={18} /><span className={`d-state ${tone}`}>{state}</span></header>
-    <div className="d-money-amt"><strong>{money(project.amount_cents)}</strong><small>USD</small></div>
+    <header className="d-money-head"><PayPalMark h={16} /><span className={`d-state ${tone}`}>{state}</span></header>
+    <HoldCard project={project} />
     {f.mode === "HOLD" && <VaultScene project={project} audit={audit} me={data.user} />}
     {days !== null && <div className="d-hold" aria-label={`${days} of ${HOLD_DAYS} days left on the hold`}>
       <div className="d-hold-bar"><i style={{ width: `${days / HOLD_DAYS * 100}%` }} className={days <= 3 ? "warn" : ""} /></div>
@@ -266,10 +313,6 @@ function MoneyCard({ project, data, audit, busy, run }: { project: Project; data
       {f.status !== "NONE" && f.status !== "ORDER_CREATED" && !paid && <button className="d-btn ghost sm" disabled={busy} onClick={() => run({ action: "sync_payment", id: project.id }, "Checked the latest status with PayPal.")}><RefreshCw size={14} /> Check PayPal</button>}
       {f.mode !== "HOLD" && project.role === "client" && project.paymentAwaitingReconciliation && <button className="d-btn ghost sm" disabled={busy} onClick={() => run({ action: "sync_payment", id: project.id }, "Payment status checked with PayPal.")}><RefreshCw size={14} /> Reconcile</button>}
     </div>
-    {(project.paypal_capture_id || project.paypal_order_id) && <dl className="d-ids">
-      {project.paypal_order_id && <div><dt>Order</dt><dd>{project.paypal_order_id}</dd></div>}
-      {project.paypal_capture_id && <div><dt>Capture</dt><dd>{project.paypal_capture_id}</dd></div>}
-    </dl>}
     <p className="d-sandbox">Sandbox</p>
   </section>;
 }
@@ -404,13 +447,22 @@ function Terms({ project }: { project: Project }) {
   </section>;
 }
 
+function dayLabel(value: string) {
+  const d = new Date(value), today = new Date(), y = new Date(); y.setDate(today.getDate() - 1);
+  return d.toDateString() === today.toDateString() ? "Today" : d.toDateString() === y.toDateString() ? "Yesterday" : d.toLocaleDateString("en-US", { weekday: "short", month: "short", day: "numeric" });
+}
 function ActivityFeed({ audit }: { audit: Event[] }) {
   if (!audit.length) return <div className="d-empty-sm"><Inbox size={20} /> Nothing yet</div>;
-  return <ol className="d-feed">{audit.map((e, i) => { const m = EVENT[e.type] ?? { label: e.type.replaceAll("_", " ").toLowerCase(), icon: FileText }; const Icon = m.icon; return <li key={i} className={m.tone ? `t-${m.tone}` : ""}>
-    <span className="d-feed-ic"><Icon size={14} /></span>
-    <div><strong>{m.label}</strong><p>{e.detail}</p></div>
-    <time title={date(e.created_at)}>{ago(e.created_at)}</time>
-  </li>; })}</ol>;
+  const days: Array<{ day: string; items: Event[] }> = [];
+  for (const e of audit) { const day = dayLabel(e.created_at); if (days[days.length - 1]?.day !== day) days.push({ day, items: [] }); days[days.length - 1].items.push(e); }
+  return <div className="d-feed-days">{days.map(g => <section key={g.day}>
+    <h4 className="d-feed-day">{g.day}</h4>
+    <ol className="d-feed">{g.items.map((e, i) => { const m = EVENT[e.type] ?? { label: e.type.replaceAll("_", " ").toLowerCase(), icon: FileText }; const Icon = m.icon; return <li key={i} className={m.tone ? `t-${m.tone}` : ""}>
+      <span className="d-feed-ic"><Icon size={14} /></span>
+      <div><strong>{m.label}</strong><p>{e.detail}</p></div>
+      <time title={date(e.created_at)}>{new Date(e.created_at).toLocaleTimeString("en-US", { hour: "numeric", minute: "2-digit" })}</time>
+    </li>; })}</ol>
+  </section>)}</div>;
 }
 
 /* ───────────────────────── views ───────────────────────── */
@@ -419,7 +471,7 @@ function AgreementCard({ p, data, onOpen }: { p: Project; data: WorkspaceData; o
   return <button className={`d-agree ${move.mine ? "mine" : ""}`} onClick={onOpen}>
     <div className="d-agree-top"><Avatar email={other} size={34} /><div className="d-agree-who"><strong>{p.title}</strong><small>{p.role === "client" ? "to" : "from"} {handle(other)}</small></div><span className="d-agree-amt">{money(p.amount_cents)}</span></div>
     <JourneyBar project={p} compact />
-    <div className={`d-agree-move t-${move.tone}`}>{move.mine && <span className="d-pulse" />}<span>{move.title}</span>{isHeld(p) && !isPaid(p) && <em className="d-held"><Lock size={11} /> Held</em>}<ArrowRight size={15} className="d-agree-go" /></div>
+    <div className={`d-agree-move t-${move.tone}`}>{move.mine && <span className="d-pulse" />}<span>{move.title}</span>{isHeld(p) && !isPaid(p) && <em className="d-held"><Lock size={11} /> Held{p.funding.expiresAt ? ` · ${Math.max(0, Math.ceil((new Date(p.funding.expiresAt).getTime() - Date.now()) / 86_400_000))}d` : ""}</em>}<ArrowRight size={15} className="d-agree-go" /></div>
   </button>;
 }
 
@@ -430,7 +482,12 @@ function Overview({ data, open, create }: { data: WorkspaceData; open: (id: stri
     const mine = data.projects.filter(p => nextMove(p, data).mine);
     return { held, paid, mine };
   }, [data]);
+  const [filter, setFilter] = useState<"all" | "mine" | "held" | "paid">("all");
+  const [query, setQuery] = useState("");
   const sorted = useMemo(() => [...data.projects].sort((a, b) => Number(nextMove(b, data).mine) - Number(nextMove(a, data).mine)), [data]);
+  const shown = sorted.filter(p => (filter === "all" || (filter === "mine" ? nextMove(p, data).mine : filter === "held" ? isHeld(p) && !isPaid(p) : isPaid(p)))
+    && (!query.trim() || `${p.title} ${p.client_email} ${p.freelancer_email}`.toLowerCase().includes(query.trim().toLowerCase())));
+  const counts = { all: data.projects.length, mine: t.mine.length, held: data.projects.filter(p => isHeld(p) && !isPaid(p)).length, paid: data.projects.filter(isPaid).length };
   return <div className="d-view">
     <section className="d-hello">
       <Avatar email={data.user.email} name={data.user.name} src={data.user.avatar} size={56} ring />
@@ -438,13 +495,18 @@ function Overview({ data, open, create }: { data: WorkspaceData; open: (id: stri
       <button className="d-btn primary" onClick={create}><Plus size={16} /> New agreement</button>
     </section>
     <section className="d-tiles" aria-label="Totals">
-      <div className="d-tile pp"><span className="d-tile-ic"><Lock size={18} /></span><small>Held by PayPal</small><strong>{money(t.held)}</strong></div>
-      <div className="d-tile ok"><span className="d-tile-ic"><CircleDollarSign size={18} /></span><small>Paid out</small><strong>{money(t.paid)}</strong></div>
-      <div className="d-tile act"><span className="d-tile-ic"><ArrowRight size={18} /></span><small>Your move</small><strong>{t.mine.length}</strong></div>
+      <button className={`d-tile pp ${filter === "held" ? "on" : ""}`} onClick={() => setFilter(filter === "held" ? "all" : "held")}><span className="d-tile-ic"><Lock size={18} /></span><small>Held by PayPal</small><strong>{money(t.held)}</strong></button>
+      <button className={`d-tile ok ${filter === "paid" ? "on" : ""}`} onClick={() => setFilter(filter === "paid" ? "all" : "paid")}><span className="d-tile-ic"><CircleDollarSign size={18} /></span><small>Paid out</small><strong>{money(t.paid)}</strong></button>
+      <button className={`d-tile act ${filter === "mine" ? "on" : ""}`} onClick={() => setFilter(filter === "mine" ? "all" : "mine")}><span className="d-tile-ic"><ArrowRight size={18} /></span><small>Your move</small><strong>{t.mine.length}</strong></button>
     </section>
     {data.projects.length ? <>
-      <div className="d-sec"><h2>Agreements</h2><span className="d-muted">{data.projects.length}</span></div>
-      <div className="d-grid">{sorted.map(p => <AgreementCard key={p.id} p={p} data={data} onOpen={() => open(p.id)} />)}</div>
+      <div className="d-sec"><h2>Agreements</h2>
+        <div className="d-filters" role="tablist" aria-label="Filter agreements">{([["all", "All"], ["mine", "Your move"], ["held", "In PayPal"], ["paid", "Paid"]] as const).map(([k, label]) =>
+          <button key={k} role="tab" aria-selected={filter === k} className={filter === k ? "on" : ""} onClick={() => setFilter(k)}>{label}<span>{counts[k]}</span></button>)}</div>
+        <label className="d-search"><SearchCheck size={15} /><input value={query} onChange={e => setQuery(e.target.value)} placeholder="Search" aria-label="Search agreements" /></label>
+      </div>
+      {shown.length ? <div className="d-grid">{shown.map(p => <AgreementCard key={p.id} p={p} data={data} onOpen={() => open(p.id)} />)}</div>
+        : <div className="d-empty-sm"><Inbox size={18} /> Nothing here <button className="d-link" onClick={() => { setFilter("all"); setQuery(""); }}>Show all</button></div>}
     </> : <section className="d-empty">
       <div className="d-empty-art" aria-hidden="true"><span><Handshake size={22} /></span><i /><span className="pp"><Lock size={22} /></span><i /><span className="ok"><Coins size={22} /></span></div>
       <h2>Agree. Secure. Get paid.</h2>
@@ -454,13 +516,25 @@ function Overview({ data, open, create }: { data: WorkspaceData; open: (id: stri
   </div>;
 }
 
-function Detail({ project, data, audit, history, busy, run, onFunded, onPaid, onError, connectSeller, back }: {
+function Detail({ project, data, audit, history, busy, run, onFunded, onPaid, onError, connectSeller, back, notify }: {
   project: Project; data: WorkspaceData; audit: Event[]; history: RunSummary[]; busy: boolean; run: Run;
-  onFunded: () => void; onPaid: () => void; onError: (m: string) => void; connectSeller: (id: string) => void; back: () => void;
+  onFunded: () => void; onPaid: () => void; onError: (m: string) => void; connectSeller: (id: string) => void; back: () => void; notify: (m: string) => void;
 }) {
   const [tab, setTab] = useState<"work" | "activity">("work");
   const client = project.role === "client";
   const me = data.user;
+  const copyLink = async () => {
+    const url = `${window.location.origin}/app?project=${encodeURIComponent(project.id)}`;
+    try { await navigator.clipboard.writeText(url); notify(client ? "Link copied. Send it to your freelancer." : "Link copied."); } catch { notify(url); }
+  };
+  /** The whole agreement and its audit trail as one file, for your own records or a dispute. */
+  const downloadRecord = () => {
+    const record = { exportedAt: new Date().toISOString(), agreement: project, activity: audit, checkHistory: history };
+    const a = document.createElement("a");
+    a.href = URL.createObjectURL(new Blob([JSON.stringify(record, null, 2)], { type: "application/json" }));
+    a.download = `savepal-${project.title.toLowerCase().replace(/[^a-z0-9]+/g, "-").slice(0, 40)}-${project.id.slice(0, 8)}.json`;
+    a.click(); setTimeout(() => URL.revokeObjectURL(a.href), 2000);
+  };
   return <div className="d-view">
     <button className="d-back" onClick={back}><ArrowLeft size={15} /> All agreements</button>
     <section className="d-head">
@@ -472,7 +546,11 @@ function Detail({ project, data, audit, history, busy, run, onFunded, onPaid, on
           <span className="d-party"><Avatar email={project.freelancer_email} src={client ? null : me.avatar} size={28} /><span><small>Freelancer</small>{client ? handle(project.freelancer_email) : "You"}</span></span>
         </div>
       </div>
-      <a className="d-btn realm" href={`/app/realm?id=${encodeURIComponent(project.id)}`}><Castle size={16} /> Enter the realm <ArrowUpRight size={14} /></a>
+      <div className="d-head-actions">
+        <button className="d-icon-btn" onClick={copyLink} title="Copy link to this agreement" aria-label="Copy link"><Link2 size={16} /></button>
+        <button className="d-icon-btn" onClick={downloadRecord} title="Download the full record (JSON)" aria-label="Download record"><Download size={16} /></button>
+        <a className="d-btn realm" href={`/app/realm?id=${encodeURIComponent(project.id)}`}><Castle size={16} /> Enter the realm <ArrowUpRight size={14} /></a>
+      </div>
     </section>
     <div className="d-card d-journey-card"><JourneyBar project={project} /></div>
     <div className="d-tabs" role="tablist"><button role="tab" aria-selected={tab === "work"} className={tab === "work" ? "on" : ""} onClick={() => setTab("work")}>Overview</button><button role="tab" aria-selected={tab === "activity"} className={tab === "activity" ? "on" : ""} onClick={() => setTab("activity")}>Activity <span>{audit.length}</span></button></div>
@@ -644,7 +722,7 @@ export default function Workspace() {
         {notice && <div className="d-toast ok" role="status"><span className="d-live-dot" /><span>{notice}</span><button onClick={() => setNotice("")} aria-label="Dismiss"><X size={15} /></button></div>}
         {!data && !error && <div className="d-skel"><span /><span /><span /></div>}
         {data && creating && <Create data={data} busy={busy} run={run} cancel={home} />}
-        {data && !creating && project && <Detail key={project.id} project={project} data={data} audit={audit} history={history} busy={busy} run={run} onFunded={onFunded} onPaid={onPaid} onError={onError} connectSeller={connectSeller} back={home} />}
+        {data && !creating && project && <Detail key={project.id} project={project} data={data} audit={audit} history={history} busy={busy} run={run} onFunded={onFunded} onPaid={onPaid} onError={onError} connectSeller={connectSeller} back={home} notify={setNotice} />}
         {data && !creating && !project && <Overview data={data} open={open} create={create} />}
       </div>
     </main>
