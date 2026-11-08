@@ -39,7 +39,7 @@ export function levelFor(xp: number): { level: number; into: number; need: numbe
 }
 
 /** Houses standing in the town: it starts as a hamlet and fills its blocks as you level up. */
-export const housesBuilt = (level: number, total: number) => Math.min(total, 40 + level * 6);
+export const housesBuilt = (level: number, total: number) => Math.min(total, 18 + level * 6);
 
 /** What a level unlocks, shown on the level-up banner. */
 export const UNLOCKS: Record<number, string> = {

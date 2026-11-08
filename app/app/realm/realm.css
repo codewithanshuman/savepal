@@ -294,3 +294,17 @@ button.hud{font:inherit;color:inherit;text-align:left;cursor:pointer}
   .hud-title{top:68px}
   .hud-treasury,.hud-zoom,.hud-log.closed{top:236px}
 }
+
+/* ── the city renderer fills the screen under the HUD ── */
+.realm-world{position:absolute;inset:0;z-index:0}
+.realm-world canvas{display:block;image-rendering:pixelated}
+.realm-pop{position:absolute;z-index:7}
+.top-pill img{width:32px;height:32px;flex:none;margin-left:-18px;image-rendering:auto;filter:drop-shadow(0 2px 0 #0d1422)}
+@media (max-width:900px){.top-pill img{width:22px;height:22px;margin-left:-12px}}
+
+/* ── the treasury vault: the gold-coin art, sized by what PayPal holds ── */
+.court-vault{display:flex;align-items:center;gap:12px;margin:10px 0}
+.court-vault img{width:112px;height:112px;flex:none;filter:drop-shadow(0 6px 10px rgba(0,0,0,.35));transition:transform .4s,filter .4s,opacity .4s}
+.court-vault.empty img{opacity:.28;filter:grayscale(1);transform:scale(.7)}
+.court-vault.paid img{transform:scale(.86)}
+.court-vault .court-gold{flex:1;margin:0}

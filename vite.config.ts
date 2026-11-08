@@ -1,3 +1,4 @@
+import { fileURLToPath } from "node:url";
 import vinext from "vinext";
 import { defineConfig } from "vite";
 import hostingConfig from "./.openai/hosting.json";
@@ -55,6 +56,14 @@ export default defineConfig(async ({ command }) => {
   const { cloudflare } = await import("@cloudflare/vite-plugin");
 
   return {
+    resolve: {
+      alias: [
+        // The vendored city renderer (Claude Clan, via grounded) imports its protocol by package name.
+        { find: "@sudo-city/protocol", replacement: fileURLToPath(new URL("./lib/city-protocol/index.ts", import.meta.url)) },
+        // `import Phaser from "phaser"`: the package's ESM build has no default export, its bundled build does.
+        { find: /^phaser$/, replacement: fileURLToPath(new URL("./node_modules/phaser/dist/phaser.js", import.meta.url)) },
+      ],
+    },
     server: {
       ...(managedLinux
         ? { host: "0.0.0.0", allowedHosts: ["terminal.local"] }

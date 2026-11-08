@@ -26,6 +26,9 @@
     "paths": {
       "@/*": [
         "./*"
+      ],
+      "@sudo-city/protocol": [
+        "./lib/city-protocol/index.ts"
       ]
     },
     "types": [
