@@ -175,7 +175,8 @@ function distanceOutsideCity(
 ): number {
   const dx = x < 0 ? -x : x > width - 1 ? x - (width - 1) : 0;
   const dy = y < 0 ? -y : y > height - 1 ? y - (height - 1) : 0;
-  return Math.hypot(dx, dy);
+  // SavePal: a square coast makes the island a true box with sharp corners.
+  return coast.square ? Math.max(dx, dy) : Math.hypot(dx, dy);
 }
 
 /**
@@ -204,7 +205,7 @@ function shoreDistance(
   return (
     raw +
     (unitFloat(hashCoords(x, y, 0x5ea)) - 0.5) *
-      SHORE_JITTER *
+      SHORE_JITTER * coast.jitter *
       shoreJitterScale(x, y, width, height)
   );
 }
@@ -387,6 +388,10 @@ export function buildTerrain(snapshot: WorldSnapshot): TerrainGrid {
  * own reserve works. The Realm registers its plan once, before the first terrain pass.
  */
 export type EstateRect = { minX: number; minY: number; maxX: number; maxY: number };
+/** SavePal extension: the island's coast -- grass ring and sand ring widths, and whether the shore is jittered. */
+let coast = { countryside: COUNTRYSIDE_RING, sand: COAST_RING, jitter: 1, square: false };
+export function setCoast(next: { countryside: number; sand: number; jitter: number; square: boolean }): void { coast = next; }
+export function islandRings(): number { return coast.countryside + coast.sand; }
 let estates: readonly EstateRect[] = [];
 export function setEstates(rects: readonly EstateRect[]): void { estates = rects; }
 const inEstate = (x: number, y: number) => estates.some((e) => x >= e.minX && x <= e.maxX && y >= e.minY && y <= e.maxY);
@@ -423,7 +428,7 @@ function classify(
 
   const distance = shoreDistance(x, y, width, height);
 
-  if (distance <= COUNTRYSIDE_RING) {
+  if (distance <= coast.countryside) {
     // The harbour, the naval base and the airport are all sprites, not
     // terrain (see CLAUDE.md on the capitol), so nothing else stops the
     // countryside's tree scatter from planting one on the runway or inside
@@ -432,7 +437,7 @@ function classify(
       isOnCoastInstallation(x, y, width, height) || isOnAirportGround(x, y, width, height);
     return grassCell(x, y, 0x7ee, noProp);
   }
-  if (distance <= COUNTRYSIDE_RING + COAST_RING) {
+  if (distance <= coast.countryside + coast.sand) {
     return {
       x,
       y,

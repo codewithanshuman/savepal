@@ -138,73 +138,62 @@ export function bakeTerrainAtlas(scene: Phaser.Scene, baker: Baker): void {
 }
 
 
+/*
+ * SavePal's own ground art, replacing the archive's tiles under the same atlas frames: lush
+ * painted grass, warm sand, a deep teal sea, herringbone plaza stone, and ancient roads --
+ * flagstone avenues, cobbled streets and dirt lanes with wheel ruts. No outlines between tiles,
+ * so fields read as one continuous meadow rather than a grid.
+ */
+const REALM = {
+  grass: [0x79c35a, 0x74be55, 0x7fc85f], park: 0x6db84f, meadow: 0x86cb63, ground: 0x76c057,
+  sand: [0xeedca9, 0xe6d19a], plaza: 0xeee2c8, plazaJoint: 0xd6c7a7,
+  water: [0x3fa2da, 0x3b9bd2, 0x2f88c2], foam: 0xd8f0ff,
+  cobble: 0xc9bc9c, cobbleDark: 0xad9f80, kerb: 0x9c8f78, flag: 0xe6d8b6, flagJoint: 0xcdbd99, dirt: 0xc8a676, rut: 0xa8865a,
+};
+const hash01 = (a: number, b: number) => { const x = Math.sin(a * 127.1 + b * 311.7) * 43758.5453; return x - Math.floor(x); };
+
 export function drawGroundTile(
   baker: Baker,
   originX: number,
   originY: number,
-  color: number,
+  _color: number,
   seed: number,
 ): void {
-  fillFace(baker, color, 1, diamond(0.5), originX, originY);
-
-  // A faint darker edge on the two far sides reads as a very shallow slab and
-  // stops large fields looking like flat paper.
-  strokeFace(baker, shade(color, -8), 0.5, 1, diamond(0.5), originX, originY);
-
-  // Scattered blades, positioned from the variant seed so tiles differ but
-  // each variant is stable.
-  baker.graphics.fillStyle(shade(color, 10), 0.55);
-  for (let index = 0; index < 6; index += 1) {
-    const angle = ((seed * 37 + index * 61) % 360) * (Math.PI / 180);
-    const radius = 0.12 + ((seed * 13 + index * 29) % 24) / 100;
-    const point = baker.at(
-      [Math.cos(angle) * radius, Math.sin(angle) * radius, 0],
-      originX,
-      originY,
-    );
-    baker.graphics.fillRect(point.x, point.y, 3, 2);
+  const g = baker.graphics;
+  const base = seed <= 2 ? REALM.grass[seed]! : seed === 3 ? REALM.sand[0] : seed === 4 ? REALM.sand[1] : seed === 7 ? REALM.park : seed === 8 ? REALM.meadow : REALM.ground;
+  const sand = seed === 3 || seed === 4;
+  fillFace(baker, base, 1, diamond(0.5), originX, originY);
+  // a soft lighter wash so the tile has a sense of light, without a hard edge
+  fillFace(baker, shade(base, 7), 0.35, diamond(0.3), originX, originY);
+  for (let i = 0; i < 14; i += 1) {
+    const u = hash01(seed + 1, i) - 0.5, v = hash01(i + 3, seed + 7) - 0.5;
+    if (Math.abs(u) + Math.abs(v) > 0.46) continue;
+    const p = baker.at([u * 0.9, v * 0.9, 0], originX, originY);
+    if (sand) { g.fillStyle(shade(base, i % 2 ? -8 : 8), 0.6).fillEllipse(p.x, p.y, 6, 1.4); continue; }
+    const dark = i % 3 === 0;
+    g.lineStyle(1.2, shade(base, dark ? -14 : 14), 0.75).beginPath().moveTo(p.x, p.y).lineTo(p.x + (i % 2 ? 1.2 : -1.2), p.y - 3.4).strokePath();
+  }
+  if (!sand && seed !== 11 && seed % 2 === 0) {
+    const p = baker.at([0.12, -0.08, 0], originX, originY);
+    for (const [dx, dy, c] of [[0, 0, 0xffffff], [3, 1, 0xffd15c], [-3, 2, 0xff8fb1]] as const) g.fillStyle(c, 0.95).fillCircle(p.x + dx, p.y + dy, 1.3);
   }
 }
 
-
-/**
- * Paving: the capitol's apron and the walk out to its boulevard.
- *
- * Deliberately the same stone as the pavement beside every street in the city,
- * so the walk reads as continuous with the road it meets rather than as a
- * different material that happens to touch it. The quartered joint is what
- * keeps a run of these from looking like one flat sheet.
- */
 export function drawPlazaTile(baker: Baker, originX: number, originY: number): void {
-  fillFace(baker, TERRAIN_COLORS.pavement, 1, diamond(0.5), originX, originY);
-  strokeFace(
-    baker,
-    shade(TERRAIN_COLORS.pavement, -10),
-    0.55,
-    1,
-    diamond(0.5),
-    originX,
-    originY,
-  );
-  // Slab joints across the middle of the tile, in grid space so they line up
-  // tile to tile.
-  baker.graphics.lineStyle(1, shade(TERRAIN_COLORS.pavement, -8), 0.5);
-  for (const line of [
-    [
-      [-0.5, 0, 0],
-      [0.5, 0, 0],
-    ],
-    [
-      [0, -0.5, 0],
-      [0, 0.5, 0],
-    ],
-  ] as Point3[][]) {
-    const from = baker.at(line[0] as Point3, originX, originY);
-    const to = baker.at(line[1] as Point3, originX, originY);
-    baker.graphics.lineBetween(from.x, from.y, to.x, to.y);
+  fillFace(baker, REALM.plaza, 1, diamond(0.5), originX, originY);
+  const g = baker.graphics;
+  g.lineStyle(1, REALM.plazaJoint, 0.8);
+  // herringbone slabs, laid in grid space so they continue tile to tile
+  for (let k = -0.5; k <= 0.5; k += 0.25) {
+    const a = baker.at([k, -0.5, 0], originX, originY), b = baker.at([k, 0.5, 0], originX, originY);
+    g.lineBetween(a.x, a.y, b.x, b.y);
+  }
+  for (let k = -0.375; k <= 0.5; k += 0.25) for (let j = -0.5; j < 0.5; j += 0.25) {
+    const off = Math.round((k + 0.5) / 0.25) % 2 ? 0.125 : 0;
+    const a = baker.at([k - 0.25, j + off, 0], originX, originY), b = baker.at([k, j + off, 0], originX, originY);
+    g.lineBetween(a.x, a.y, b.x, b.y);
   }
 }
-
 
 export function drawWaterTile(
   baker: Baker,
@@ -212,27 +201,16 @@ export function drawWaterTile(
   originY: number,
   variant: number,
 ): void {
-  const base = variant === 2 ? TERRAIN_COLORS.waterDeep : TERRAIN_COLORS.water;
+  const base = REALM.water[variant] ?? REALM.water[0]!;
   fillFace(baker, base, 1, diamond(0.5), originX, originY);
-  fillFace(baker, shade(base, -6), 0.6, diamond(0.34), originX, originY);
-
-  if (variant !== 2) {
-    baker.graphics.fillStyle(TERRAIN_COLORS.waterFoam, 0.35);
-    const crest = baker.at([-0.1 + variant * 0.18, -0.05, 0], originX, originY);
-    baker.graphics.fillRect(crest.x - 8, crest.y, 16, 2);
+  fillFace(baker, shade(base, -5), 0.5, diamond(0.32), originX, originY);
+  const g = baker.graphics;
+  for (let i = 0; i < 3; i += 1) {
+    const p = baker.at([hash01(variant, i) * 0.6 - 0.3, hash01(i, variant + 5) * 0.6 - 0.3, 0], originX, originY);
+    g.fillStyle(REALM.foam, 0.28).fillEllipse(p.x, p.y, 10 - i * 2, 1.6);
   }
 }
 
-
-/**
- * Roads are drawn as a centre block plus one arm per connected neighbour, all
- * in grid space, so junctions line up exactly whatever the mask.
- *
- * The carriageway and kerb widths come from the cell's own road class, so
- * where a narrow back lane's arm meets a boulevard's wide centre block the
- * narrow arm simply joins the wide one -- no junction special-casing is
- * needed, the geometry does it.
- */
 export function drawRoadTile(
   baker: Baker,
   originX: number,
@@ -242,7 +220,6 @@ export function drawRoadTile(
 ): void {
   const { road: roadHalf, kerb: kerbHalf } = ROAD_WIDTHS[roadClass];
   const arms: Array<[number, Point3[]]> = [
-    // North is -v, which projects up-and-right on screen.
     [1, band(-0.5, -roadHalf, "v", roadHalf)],
     [2, band(roadHalf, 0.5, "u", roadHalf)],
     [4, band(roadHalf, 0.5, "v", roadHalf)],
@@ -254,66 +231,46 @@ export function drawRoadTile(
     [4, band(kerbHalf, 0.5, "v", kerbHalf)],
     [8, band(-0.5, -kerbHalf, "u", kerbHalf)],
   ];
-
-  // Grass base, so an arm that stops mid-tile blends into the lot beside it.
-  fillFace(baker, TERRAIN_COLORS.ground, 1, diamond(0.5), originX, originY);
-
-  // A boulevard's kerb runs a shade paler than an ordinary street's, so the
-  // main road reads as a different, grander pavement rather than just a wider
-  // version of the same one.
-  const kerbColor =
-    roadClass === "boulevard" ? shade(TERRAIN_COLORS.pavement, 6) : TERRAIN_COLORS.pavement;
-  fillFace(baker, kerbColor, 1, diamond(kerbHalf), originX, originY);
-  for (const [bit, points] of kerbArms) {
-    if (mask & bit) {
-      fillFace(baker, kerbColor, 1, points, originX, originY);
-    }
+  const g = baker.graphics;
+  fillFace(baker, REALM.ground, 1, diamond(0.5), originX, originY);
+  // ancient roads: a dirt lane, a cobbled street, or a flagstone avenue with stone kerbs
+  const lane = roadClass === "lane", avenue = roadClass === "boulevard";
+  const surface = lane ? REALM.dirt : avenue ? REALM.flag : REALM.cobble;
+  if (!lane) {
+    fillFace(baker, REALM.kerb, 1, diamond(kerbHalf), originX, originY);
+    for (const [bit, points] of kerbArms) if (mask & bit) fillFace(baker, REALM.kerb, 1, points, originX, originY);
   }
-
-  fillFace(baker, TERRAIN_COLORS.road, 1, diamond(roadHalf), originX, originY);
-  for (const [bit, points] of arms) {
-    if (mask & bit) {
-      fillFace(baker, TERRAIN_COLORS.road, 1, points, originX, originY);
+  fillFace(baker, surface, 1, diamond(roadHalf), originX, originY);
+  for (const [bit, points] of arms) if (mask & bit) fillFace(baker, surface, 1, points, originX, originY);
+  // the surface texture, kept inside the carriageway
+  const inside = (u: number, v: number) => (Math.abs(u) <= roadHalf && Math.abs(v) <= roadHalf)
+    || ((mask & 1) && v < 0 && Math.abs(u) <= roadHalf) || ((mask & 4) && v > 0 && Math.abs(u) <= roadHalf)
+    || ((mask & 2) && u > 0 && Math.abs(v) <= roadHalf) || ((mask & 8) && u < 0 && Math.abs(v) <= roadHalf);
+  if (lane) {
+    for (const off of [-0.08, 0.08]) {
+      if ((mask & (2 | 8)) && !(mask & (1 | 4))) { const a = baker.at([-0.5, off, 0], originX, originY), b = baker.at([0.5, off, 0], originX, originY); g.lineStyle(1.4, REALM.rut, 0.7).lineBetween(a.x, a.y, b.x, b.y); }
+      if ((mask & (1 | 4)) && !(mask & (2 | 8))) { const a = baker.at([off, -0.5, 0], originX, originY), b = baker.at([off, 0.5, 0], originX, originY); g.lineStyle(1.4, REALM.rut, 0.7).lineBetween(a.x, a.y, b.x, b.y); }
     }
-  }
-
-  // Lane markings only on a straight run; a junction would be a mess of
-  // paint. A back lane carries no markings at all -- it reads as service
-  // access, not a through street.
-  if (roadClass === "lane") {
     return;
   }
-  const straightUV = mask === (2 | 8);
-  const straightVU = mask === (1 | 4);
-  if (!straightUV && !straightVU) {
+  if (avenue) {
+    g.lineStyle(1, REALM.flagJoint, 0.9);
+    for (let k = -0.5; k <= 0.5; k += 0.2) for (const [u0, v0, u1, v1] of [[k, -0.5, k, 0.5], [-0.5, k, 0.5, k]] as const) {
+      const steps = 10;
+      for (let s = 0; s < steps; s += 1) {
+        const ua = u0 + (u1 - u0) * s / steps, va = v0 + (v1 - v0) * s / steps, ub = u0 + (u1 - u0) * (s + 1) / steps, vb = v0 + (v1 - v0) * (s + 1) / steps;
+        if (!inside((ua + ub) / 2, (va + vb) / 2)) continue;
+        const a = baker.at([ua, va, 0], originX, originY), b = baker.at([ub, vb, 0], originX, originY);
+        g.lineBetween(a.x, a.y, b.x, b.y);
+      }
+    }
     return;
   }
-  // A boulevard gets a solid centre line flanked by a dash on each side --
-  // "both directions" of a divided carriageway -- where an ordinary street
-  // keeps its single dashed lane line.
-  const dashes =
-    roadClass === "boulevard"
-      ? [
-          { offset: -0.3, solid: false },
-          { offset: 0, solid: true },
-          { offset: 0.3, solid: false },
-        ]
-      : [
-          { offset: -0.28, solid: false },
-          { offset: 0.04, solid: false },
-        ];
-  for (const { offset, solid } of dashes) {
-    const start = solid ? -0.5 : offset;
-    const end = solid ? 0.5 : offset + 0.24;
-    const from: Point3 = straightUV ? [start, offset, 0] : [offset, start, 0];
-    const to: Point3 = straightUV ? [end, offset, 0] : [offset, end, 0];
-    baker.graphics.lineStyle(2, TERRAIN_COLORS.roadLine, 0.85);
-    baker.graphics.lineBetween(
-      baker.at(from, originX, originY).x,
-      baker.at(from, originX, originY).y,
-      baker.at(to, originX, originY).x,
-      baker.at(to, originX, originY).y,
-    );
+  for (let i = 0; i < 46; i += 1) {
+    const u = hash01(mask + 11, i) - 0.5, v = hash01(i + 5, mask + 3) - 0.5;
+    if (!inside(u, v)) continue;
+    const p = baker.at([u, v, 0], originX, originY);
+    g.fillStyle(i % 3 ? REALM.cobbleDark : shade(REALM.cobble, 10), 0.85).fillEllipse(p.x, p.y, 5, 2.6);
   }
 }
 

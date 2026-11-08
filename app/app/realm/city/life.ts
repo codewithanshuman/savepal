@@ -17,6 +17,7 @@ import { PALACE_FLAGS, PALACE_POSTS } from "./textures/palace";
 import { BOUNTY_SLOTS, GUILD_FLAG, PORT_FLAG, TOWN } from "./textures/town";
 import { WINDMILL_HUB } from "./textures/farms";
 import { FLAG_FRAMES, GULL, PLANES, SAILS, flagKey, type FlagColor } from "./textures/sky";
+import { RES } from "./textures/atelier";
 
 export const PEOPLE = ["architect", "miner", "carpenter", "gardener", "chef", "spearman", "swordsman", "archer"] as const;
 export type Person = (typeof PEOPLE)[number];
@@ -73,7 +74,7 @@ export class KingdomLife {
   }
 
   private flag(x: number, y: number, color: FlagColor, depth: number, i = 0): Phaser.GameObjects.Sprite {
-    const s = this.scene.add.sprite(x, y, flagKey(color, 0)).setOrigin(.04, .1).setDepth(depth);
+    const s = this.scene.add.sprite(x, y, flagKey(color, 0)).setOrigin(.04, .1).setScale(1 / RES).setDepth(depth);
     if (!this.still) s.play({ key: `savepal:flag:${color}`, startFrame: i % FLAG_FRAMES });
     return s;
   }
@@ -106,7 +107,7 @@ export class KingdomLife {
       if (s.kind === "port") { const p = at(s.x + PORT_FLAG.u, s.y + PORT_FLAG.v, PORT_FLAG.z); add(this.flag(p.x, p.y, "paypal", d + 2, 3)); }
       if (s.kind === "windmill") {
         const p = at(s.x + WINDMILL_HUB.u, s.y + WINDMILL_HUB.v, WINDMILL_HUB.z);
-        const sail = add(this.scene.add.image(p.x, p.y, SAILS).setScale(1.35).setDepth(d + 3).setAngle(Math.random() * 90));
+        const sail = add(this.scene.add.image(p.x, p.y, SAILS).setScale(1.35 / RES).setDepth(d + 3).setAngle(Math.random() * 90));
         if (!this.still) this.sails.push(this.scene.tweens.add({ targets: sail, angle: "+=360", duration: 9000, repeat: -1 }));
       }
       if (s.kind === "guild" && !this.still) {
@@ -153,14 +154,14 @@ export class KingdomLife {
     const palace = find(s => s.kind === "palace"), bazaar = find(s => s.kind === "bazaar"), guild = find(s => s.kind === "guild"), port = find(s => s.kind === "port");
     if (palace) {
       const d = structureDepth(palace), main = PALACE_FLAGS.find(f => f.main)!, p = at(palace.x + main.u, palace.y + main.v, main.z);
-      add(this.flag(p.x, p.y, state.mainFlag, d + 3).setScale(1.5));
+      add(this.flag(p.x, p.y, state.mainFlag, d + 3).setScale(1.6 / RES));
       PALACE_POSTS.gate.slice(0, state.held ? 2 : 1).forEach(([u, v], i) => add(this.person("spearman", palace.x + u, palace.y + v, 0, i === 1)));
       PALACE_POSTS.walls.slice(0, state.held ? 4 : 2).forEach(([u, v, z], i) => add(this.person("archer", palace.x + u, palace.y + v, z, i % 2 === 1, 60)));
-      const knight = add(this.person("swordsman", palace.x - .9, palace.y - .5, 0, false, 40));
+      const [[pu0, pv0], [pu1, pv1]] = PALACE_POSTS.patrol;
+      const knight = add(this.person("swordsman", palace.x + pu0, palace.y + pv0, 0, false, 40));
       if (!this.still) {
-        const a = at(palace.x - .9, palace.y - .5), b = at(palace.x + .9, palace.y - .5);
-        this.scene.tweens.add({ targets: knight, x: b.x, y: b.y, duration: 5200, yoyo: true, repeat: -1, ease: "Sine.easeInOut", onYoyo: () => knight.setFlipX(true), onRepeat: () => knight.setFlipX(false) });
-        void a;
+        const b = at(palace.x + pu1, palace.y + pv1);
+        this.scene.tweens.add({ targets: knight, x: b.x, y: b.y, duration: 5600, yoyo: true, repeat: -1, ease: "Sine.easeInOut", onYoyo: () => knight.setFlipX(true), onRepeat: () => knight.setFlipX(false) });
       }
     }
     if (guild) {
@@ -172,7 +173,7 @@ export class KingdomLife {
     else if (guild) add(this.person("architect", guild.x - .2, guild.y + 2.1));
     if (bazaar) BOUNTY_SLOTS.slice(0, Math.min(state.bounties, BOUNTY_SLOTS.length)).forEach(([u, v]) => {
       const p = at(bazaar.x + u, bazaar.y + v);
-      add(this.scene.add.image(p.x, p.y + TOWN.bountyStall.anchorY, TOWN.bountyStall.key).setOrigin(.5, 1).setDepth(projection.depth(bazaar.x + u, bazaar.y + v) + 1));
+      add(this.scene.add.image(p.x, p.y + TOWN.bountyStall.anchorY, TOWN.bountyStall.key).setOrigin(.5, 1).setScale(1 / RES).setDepth(projection.depth(bazaar.x + u, bazaar.y + v) + 1));
     });
     if (port && state.appealOpen) [[3.2, .1], [4.2, -.1]].forEach(([u, v], i) => add(this.person("archer", port.x + u, port.y + v, 3, i === 1)));
     for (const t of this.sails) t.timeScale = state.held ? 2.2 : 1;
@@ -188,7 +189,7 @@ export class KingdomLife {
   private buildSky(): void {
     const b = this.bounds(), sky = (o: Phaser.GameObjects.GameObject) => { this.skyObjects.push(o); return o; };
     // The banner plane: a red biplane towing the agreement's PayPal news across the kingdom.
-    const red = this.scene.add.sprite(0, 0, PLANES.red[0]).setScale(1.3);
+    const red = this.scene.add.sprite(0, 0, PLANES.red[0]).setScale(1.3 / RES);
     const rope = this.scene.add.graphics();
     const cloth = this.scene.add.graphics();
     const text = this.scene.add.text(0, 0, "", { fontFamily: "Silkscreen, monospace", fontSize: "24px", color: "#003087" }).setOrigin(1, .5).setResolution(2);
@@ -210,7 +211,7 @@ export class KingdomLife {
     this.bannerRun = run;
     if (!this.still) { red.play("savepal:plane:red"); run(); } else banner.setVisible(false);
     // A second biplane flies the other way, higher, without a banner.
-    const blue = sky(this.scene.add.sprite(b.x1, b.y0 + (b.y1 - b.y0) * .55, PLANES.blue[0]).setFlipX(true).setScale(1.1).setDepth(SKY_DEPTH + 4).setData("baseScale", 1.1)) as Phaser.GameObjects.Sprite;
+    const blue = sky(this.scene.add.sprite(b.x1, b.y0 + (b.y1 - b.y0) * .55, PLANES.blue[0]).setFlipX(true).setScale(1.1 / RES).setDepth(SKY_DEPTH + 4).setData("baseScale", 1.1 / RES)) as Phaser.GameObjects.Sprite;
     const blueShadow = sky(this.scene.add.ellipse(0, 0, 70, 18, 0x14260f, .14).setDepth(SKY_DEPTH - 50)) as Phaser.GameObjects.Ellipse;
     if (!this.still) {
       blue.play("savepal:plane:blue");
@@ -221,7 +222,7 @@ export class KingdomLife {
     if (!this.still) {
       const flock = () => {
         const y = b.y0 + Math.random() * (b.y1 - b.y0) * .8, gulls: Phaser.GameObjects.Sprite[] = [];
-        for (let i = 0; i < 6; i++) gulls.push(this.scene.add.sprite(b.x1 + i * 40, y + Math.abs(i - 2.5) * 22, GULL[0]).setScale(1.6).setDepth(SKY_DEPTH + 6).setData("baseScale", 1.6).play({ key: "savepal:gull", startFrame: i % 2 }));
+        for (let i = 0; i < 6; i++) gulls.push(this.scene.add.sprite(b.x1 + i * 40, y + Math.abs(i - 2.5) * 22, GULL[0]).setScale(1.6 / RES).setDepth(SKY_DEPTH + 6).setData("baseScale", 1.6 / RES).play({ key: "savepal:gull", startFrame: i % 2 }));
         gulls.forEach(g => sky(g));
         this.scene.tweens.add({ targets: gulls, x: `-=${b.x1 - b.x0}`, duration: 34000, onComplete: () => gulls.forEach(g => { const i = this.skyObjects.indexOf(g); if (i >= 0) this.skyObjects.splice(i, 1); g.destroy(); }) });
       };
@@ -234,11 +235,12 @@ export class KingdomLife {
     if (this.still) return;
     const W = CITY_SIZE.width, H = CITY_SIZE.height;
     const routes: Array<{ from: [number, number]; to: [number, number]; flip: boolean; ms: number }> = [
-      { from: [-6, H + 8.5], to: [W + 10, H + 8.5], flip: false, ms: 150000 },
-      { from: [W + 8.5, -6], to: [W + 8.5, H + 12], flip: true, ms: 130000 },
+      { from: [-8, H + 6.5], to: [W + 8, H + 6.5], flip: false, ms: 150000 },
+      { from: [W + 6.5, -8], to: [W + 6.5, H + 10], flip: true, ms: 130000 },
+      { from: [-16, H + 13], to: [W + 14, H + 13], flip: false, ms: 190000 },
     ];
     routes.forEach((r, i) => {
-      const ship = this.scene.add.image(0, 0, TOWN.galley.key).setOrigin(.5, 1 - TOWN.galley.anchorY / TOWN.galley.height).setFlipX(r.flip).setScale(1.1);
+      const ship = this.scene.add.image(0, 0, TOWN.galley.key).setOrigin(.5, 1 - TOWN.galley.anchorY / TOWN.galley.height).setFlipX(r.flip).setScale(1.25 / RES);
       this.skyObjects.push(ship);
       this.walks.push(this.scene.tweens.addCounter({
         from: 0, to: 1, duration: r.ms, repeat: -1, delay: i * 20000,

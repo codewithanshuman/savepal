@@ -115,6 +115,8 @@ export default function Realm({ id }: { id: string }) {
   const [levelUp, setLevelUp] = useState<number | null>(null);
   const [ordersOpen, setOrdersOpen] = useState(true);
   const [pops, setPops] = useState<Array<{ id: number; x: number; y: number; xp: number }>>([]);
+  const [walking, setWalking] = useState(false);
+  const [near, setNear] = useState<string | null>(null);
   useEffect(() => { setSound(sfxEnabled()); }, []);
   const toggleSound = () => { const on = !sound; setSfxEnabled(on); setSound(on); if (on) sfx.click(); };
   /** Opening a building plays its door; closing plays it backwards. */
@@ -254,6 +256,7 @@ export default function Realm({ id }: { id: string }) {
     sfx.coins();
     const next = new Set(seen ?? []); next.add(r.key); setSeen(next);
     try { localStorage.setItem("savepal-collected", JSON.stringify([...next])); } catch { /* ignore */ }
+    flyCoins(x, y);
     const popId = Date.now() + Math.random();
     setPops(ps => [...ps, { id: popId, x, y, xp: r.xp }]);
     setTimeout(() => setPops(ps => ps.filter(q => q.id !== popId)), 1100);
@@ -297,7 +300,7 @@ export default function Realm({ id }: { id: string }) {
   const others = list.projects.filter(x => x.id !== id);
 
   return <main className="realm">
-    {realmInput && <RealmCanvas ref={realm} input={realmInput} rewards={bubbleRewards} onPick={pick} onCollect={collect} />}
+    {realmInput && <RealmCanvas ref={realm} input={realmInput} rewards={bubbleRewards} onPick={pick} onCollect={collect} onNear={setNear} />}
     {pops.map(q => <span key={q.id} className="realm-pop" style={{ left: q.x, top: q.y }} aria-hidden="true">+{q.xp} XP</span>)}
 
     <div className="hud-top" aria-label="Town progress">
@@ -339,7 +342,8 @@ export default function Realm({ id }: { id: string }) {
     <div className="hud hud-zoom" role="group" aria-label="Zoom">
       <button onClick={() => { sfx.click(); realm.current?.zoom(1); }} aria-label="Zoom in">+</button>
       <button onClick={() => { sfx.click(); realm.current?.zoom(-1); }} aria-label="Zoom out">−</button>
-      <button onClick={() => { sfx.click(); realm.current?.fit(); }} aria-label="Show the whole city">FIT</button>
+      <button onClick={() => { sfx.click(); realm.current?.fit(); }} aria-label="Show the whole kingdom">FIT</button>
+      <button className={`hud-walk ${walking ? "on" : ""}`} onClick={() => { sfx.click(); if (walking) { realm.current?.stopWalk(); setWalking(false); setNear(null); } else { setCourt(null); realm.current?.walk(p.role === "client" ? "swordsman" : "architect"); setWalking(true); } }} aria-pressed={walking} aria-label={walking ? "Stop walking" : "Walk the kingdom"} title={walking ? "Stop walking" : "Walk the kingdom (arrow keys or WASD)"}>{walking ? "EXIT" : "WALK"}</button>
       <button className={`hud-sound ${sound ? "" : "off"}`} onClick={toggleSound} aria-pressed={sound} aria-label={sound ? "Mute sounds" : "Turn sounds on"} title={sound ? "Sound on" : "Sound off"}>{sound ? "♪" : "×"}</button>
     </div>
 
@@ -376,6 +380,16 @@ export default function Realm({ id }: { id: string }) {
       <p>{UNLOCKS[levelUp] ?? "The town grows: new homes are going up."}</p>
       <button className="court-btn gold" onClick={() => { sfx.click(); setLevelUp(null); }}>WONDERFUL</button>
     </div>}
+    {walking && <>
+      <div className="walk-pad" aria-label="Walk">
+        {([["▲", 0, -1, "up"], ["◀", -1, 0, "left"], ["▶", 1, 0, "right"], ["▼", 0, 1, "down"]] as const).map(([glyph, x, y, name]) =>
+          <button key={name} className={`walk-${name}`} aria-label={`Walk ${name}`}
+            onPointerDown={e => { e.currentTarget.setPointerCapture(e.pointerId); realm.current?.pad(x, y); }}
+            onPointerUp={() => realm.current?.pad(0, 0)} onPointerCancel={() => realm.current?.pad(0, 0)}>{glyph}</button>)}
+      </div>
+      {near ? <button className="hud walk-enter" onClick={() => { sfx.open(); realm.current?.enter(); }}><span>ENTER</span><b>{near}</b><em>E ▸</em></button>
+        : <p className="walk-help">Walk with the arrow keys, WASD or the pad. Stand at a door to go inside.</p>}
+    </>}
     {(notice || error) && <div className={`hud hud-toast ${error ? "err" : ""}`} role="status"><span>{error || notice}</span><button onClick={() => { setError(""); setNotice(""); }} aria-label="Dismiss">✕</button></div>}
     <p className="realm-hint">DRAG · SCROLL TO ZOOM · TAP THE PALACE, TREASURY, BAZAAR, GUILD OR PORT</p>
   </main>;
@@ -402,6 +416,29 @@ function nextXp(p: Project): number {
   if (p.status === "SUBMITTED" || p.status === "REVIEW") return 60;
   if (p.status === "APPROVED" && !isPaid(p)) return 100 + Math.min(400, Math.floor(p.amount_cents / 1000));
   return 40;
+}
+
+/** Coins fly from the collected bubble into the coin counter in the top bar. */
+function flyCoins(x: number, y: number): void {
+  if (typeof document === "undefined") return;
+  const target = document.querySelector(".top-pill.coin img")?.getBoundingClientRect();
+  if (!target || window.matchMedia?.("(prefers-reduced-motion: reduce)").matches) return;
+  const tx = target.left + target.width / 2, ty = target.top + target.height / 2;
+  for (let i = 0; i < 7; i++) {
+    const coin = document.createElement("img");
+    coin.src = coinIconUrl(); coin.className = "fly-coin"; coin.alt = "";
+    coin.style.left = `${x}px`; coin.style.top = `${y}px`;
+    document.body.appendChild(coin);
+    const dx = (Math.random() - .5) * 90, dy = -40 - Math.random() * 50;
+    coin.animate([
+      { transform: "translate(-50%,-50%) scale(.6)", opacity: 1 },
+      { transform: `translate(calc(-50% + ${dx}px), calc(-50% + ${dy}px)) scale(1)`, opacity: 1, offset: .35 },
+      { transform: `translate(calc(-50% + ${tx - x}px), calc(-50% + ${ty - y}px)) scale(.7)`, opacity: .9 },
+    ], { duration: 900 + i * 70, easing: "cubic-bezier(.5,0,.3,1)", delay: i * 45 }).onfinish = () => {
+      coin.remove();
+      document.querySelector(".top-pill.coin")?.animate([{ transform: "scale(1)" }, { transform: "scale(1.18)" }, { transform: "scale(1)" }], { duration: 220 });
+    };
+  }
 }
 
 function questLine(p: Project): string {

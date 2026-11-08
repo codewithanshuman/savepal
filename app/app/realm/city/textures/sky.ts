@@ -5,6 +5,7 @@
  */
 import type { Scene } from "phaser";
 import { createBaker } from "../../reference-city/textures/core";
+import { RES } from "./atelier";
 
 export const FLAG_COLORS = { royal: [0x2f55c0, 0xf2b134], crimson: [0xc0392b, 0xf2b134], gold: [0xf2b134, 0xfff3c4], green: [0x1f9e62, 0xf2e9c8], paypal: [0x003087, 0x009cde] } as const;
 export type FlagColor = keyof typeof FLAG_COLORS;
@@ -78,7 +79,8 @@ function gull(g: G, up: boolean): void {
 
 export function bakeSky(scene: Scene): void {
   const baker = createBaker(scene), g = baker.graphics;
-  const make = (key: string, w: number, h: number, draw: () => void) => { if (scene.textures.exists(key)) return; draw(); baker.finish(key, w, h); };
+  g.setScale(RES);
+  const make = (key: string, w: number, h: number, draw: () => void) => { if (scene.textures.exists(key)) return; draw(); baker.finish(key, Math.ceil(w * RES), Math.ceil(h * RES)); scene.textures.get(key).setFilter(1); };
   for (const color of Object.keys(FLAG_COLORS) as FlagColor[]) for (let f = 0; f < FLAG_FRAMES; f++) make(flagKey(color, f), 40, 28, () => flag(g, FLAG_COLORS[color], f / FLAG_FRAMES * Math.PI * 2));
   make(SAILS, 128, 128, () => sails(g));
   PLANES.red.forEach((key, f) => make(key, 100, 54, () => plane(g, 0xc0392b, 0xf3ead6, f)));

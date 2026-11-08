@@ -4,7 +4,7 @@
  * give the same kingdom. Every block holds exactly one designed structure on its own five-by-five
  * ground, with streets on all four sides, so the spacing is the city grid itself.
  *
- *   royal palace     six blocks at the head of the city  -> the client's seat (checks, approval)
+ *   royal palace     eight blocks at the head of the city -> the client's seat (checks, approval)
  *   treasury         the capitol at the centre            -> the PayPal hold
  *   grand bazaar     two blocks before the treasury       -> bounties, one golden stall each
  *   guild hall       a block to the north-east            -> the freelancer (accept, deliver)
@@ -42,7 +42,7 @@ const centreOf = (r: EstateRect) => ({ x: (r.minX + r.maxX) / 2, y: (r.minY + r.
 const touchesCapitol = (r: EstateRect) => r.maxX >= capitol.minX && r.minX <= capitol.maxX && r.maxY >= capitol.minY && r.minY <= capitol.maxY;
 
 /** The great estates span several blocks; the streets between those blocks are closed. */
-export const PALACE_RECT: EstateRect = { minX: 1, minY: 1, maxX: 17, maxY: 11 };
+export const PALACE_RECT: EstateRect = { minX: 1, minY: 1, maxX: 23, maxY: 11 };
 export const BAZAAR_RECT: EstateRect = { minX: 19, minY: 25, maxX: 29, maxY: 29 };
 const inside = (r: EstateRect, outer: EstateRect) => r.minX >= outer.minX && r.maxX <= outer.maxX && r.minY >= outer.minY && r.maxY <= outer.maxY;
 
@@ -80,6 +80,28 @@ const STAGE_INFO = [
   "Harvested: PayPal has paid. The sheaves are in.",
 ];
 const hash = (s: string) => { let h = 0; for (const ch of s) h = (h * 31 + ch.charCodeAt(0)) >>> 0; return h; };
+
+/** The doors of the kingdom, for walk mode: where to stand to step inside each place. */
+export type Door = { id: string; label: string; u: number; v: number };
+export function doorsFor(structures: Structure[]): Door[] {
+  const doors: Door[] = [];
+  for (const s of structures) {
+    const front = s.role === "palace" ? 6.25 : 3.25;
+    if (s.role === "palace") doors.push({ id: "place:castle", label: "ROYAL PALACE", u: s.x, v: s.y + front });
+    else if (s.role === "bazaar") doors.push({ id: "place:market", label: "GRAND BAZAAR", u: s.x, v: s.y + front });
+    else if (s.role === "guild") doors.push({ id: "place:guild", label: "GUILD HALL", u: s.x, v: s.y + front });
+    else if (s.role === "port") doors.push({ id: "place:harbour", label: "PORT & CUSTOMS", u: s.x, v: s.y + front });
+    else if (s.role === "page") doors.push({ id: `page:${s.path.slice(4)}`, label: `WORKSHOP ${s.label ?? ""}`.trim(), u: s.x, v: s.y + front });
+    else if (s.role === "agreement" && s.target) doors.push({ id: `agreement:${s.target}`, label: (s.info ?? "MANOR").toUpperCase(), u: s.x, v: s.y + front });
+  }
+  doors.push({ id: "place:treasury", label: "ROYAL TREASURY", u: capitol.centerX, v: capitol.maxY + 1.1 });
+  return doors;
+}
+/** Ground the walker cannot cross: every structure's block, and the treasury's reserve. */
+export function blockedAt(structures: Structure[], u: number, v: number): boolean {
+  const inRect = (r: EstateRect) => u > r.minX - .55 && u < r.maxX + .55 && v > r.minY - .55 && v < r.maxY + .55;
+  return structures.some(s => inRect(s.rect)) || inRect({ minX: capitol.minX, minY: capitol.minY, maxX: capitol.maxX, maxY: capitol.maxY });
+}
 
 export function kingdom(input: RealmInput): { snapshot: WorldSnapshot; structures: Structure[] } {
   const structures: Structure[] = [];

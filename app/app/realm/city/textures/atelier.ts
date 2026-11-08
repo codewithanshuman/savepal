@@ -50,6 +50,13 @@ export const GLASS = 0x2f3650, GLOW = 0xffd98a, DOOR = 0x4a3424, GOLD = 0xf2b134
 
 export type Asset = { key: string; width: number; height: number; anchorY: number; originX?: number };
 
+/**
+ * Bake resolution: every structure is drawn this many times larger than the world's pixel grid
+ * and shown at 1/RES, so it stays crisp on high-density screens and when the camera zooms in.
+ * Phones get a lighter bake; their screens are small and the textures are mostly downscaled.
+ */
+export const RES = typeof window !== "undefined" && window.innerWidth < 900 ? 1.15 : 1.5;
+
 export class Atelier {
   constructor(readonly baker: Baker, readonly x: number, readonly y: number) {}
   at(p: Point3) { return this.baker.at(p, this.x, this.y); }
@@ -272,11 +279,14 @@ export class Atelier {
 /** Bakes every asset once with its builder (idempotent across scene restarts). */
 export function bakeAll<K extends string>(scene: Scene, assets: Record<K, Asset>, builders: Record<K, (a: Atelier) => void>): void {
   const baker = createBaker(scene);
+  // The whole drawing is scaled up by RES (lines, circles and all), then baked at RES x the size.
+  baker.graphics.setScale(RES);
   for (const name of Object.keys(assets) as K[]) {
     const asset = assets[name];
     if (scene.textures.exists(asset.key)) continue;
     builders[name](new Atelier(baker, asset.originX ?? asset.width / 2, asset.height - asset.anchorY));
-    baker.finish(asset.key, asset.width, asset.height);
+    baker.finish(asset.key, Math.ceil(asset.width * RES), Math.ceil(asset.height * RES));
+    scene.textures.get(asset.key).setFilter(1 /* LINEAR */);
   }
   baker.destroy();
 }

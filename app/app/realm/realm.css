@@ -308,3 +308,19 @@ button.hud{font:inherit;color:inherit;text-align:left;cursor:pointer}
 .court-vault.empty img{opacity:.28;filter:grayscale(1);transform:scale(.7)}
 .court-vault.paid img{transform:scale(.86)}
 .court-vault .court-gold{flex:1;margin:0}
+
+/* ── walk mode: the pad, the door prompt, and the flying coins ── */
+.hud-zoom .hud-walk{font-size:8px;letter-spacing:1px;color:#5fd39a}
+.hud-zoom .hud-walk.on{background:#5fd39a;color:#0d1422}
+.walk-pad{position:absolute;z-index:9;left:96px;bottom:110px;width:156px;height:156px;display:grid;grid-template-columns:repeat(3,1fr);grid-template-rows:repeat(3,1fr);gap:4px;touch-action:none}
+.walk-pad button{border:3px solid #0d1422;background:rgba(27,35,51,.88);color:#ffd15c;font-size:18px;border-radius:12px;cursor:pointer;touch-action:none;box-shadow:0 4px 0 rgba(0,0,0,.35)}
+.walk-pad button:active{transform:translateY(2px);box-shadow:0 2px 0 rgba(0,0,0,.35);background:#ffc439;color:#0d1422}
+.walk-pad .walk-up{grid-column:2;grid-row:1}.walk-pad .walk-left{grid-column:1;grid-row:2}.walk-pad .walk-right{grid-column:3;grid-row:2}.walk-pad .walk-down{grid-column:2;grid-row:3}
+.walk-enter{position:absolute;z-index:9;left:50%;bottom:112px;translate:-50% 0;display:flex;align-items:center;gap:12px;padding:12px 18px;border:3px solid #ffc439;cursor:pointer;animation:enter-pulse 1.2s ease-in-out infinite}
+.walk-enter span{font:400 8px "Silkscreen",monospace;letter-spacing:2px;color:#8e9bb0}
+.walk-enter b{font:400 16px "Silkscreen",monospace;color:#ffd15c}
+.walk-enter em{font:400 8px "Silkscreen",monospace;font-style:normal;color:#5fd39a;letter-spacing:1px}
+@keyframes enter-pulse{50%{box-shadow:0 0 0 6px rgba(255,196,57,.25)}}
+.walk-help{position:absolute;z-index:8;left:50%;bottom:118px;translate:-50% 0;margin:0;padding:8px 14px;background:rgba(14,22,36,.82);font:400 8px "Silkscreen",monospace;letter-spacing:1.5px;color:#dfe6f2;pointer-events:none;white-space:nowrap}
+.fly-coin{position:fixed;z-index:80;width:30px;height:30px;pointer-events:none;filter:drop-shadow(0 3px 0 rgba(0,0,0,.3))}
+@media (max-width:900px){.walk-pad{left:12px;bottom:150px;width:132px;height:132px}.walk-enter{bottom:150px}.walk-help{display:none}}

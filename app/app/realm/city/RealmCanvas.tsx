@@ -1,18 +1,24 @@
 "use client";
 /*
- * Mounts the Realm city: a Phaser game hosting SavePalScene, the same way grounded's GameCanvas
- * hosts its city scene. Phaser loads only in the browser. Data is pushed into the scene
- * imperatively; React never re-creates the game.
+ * Mounts the Realm: a Phaser game hosting SavePalScene, the same way grounded's GameCanvas hosts
+ * its city scene. Phaser loads only in the browser. The canvas renders at the screen's full pixel
+ * density with smooth (anti-aliased) drawing, so the kingdom is sharp rather than blocky. Data is
+ * pushed into the scene imperatively; React never re-creates the game.
  */
 import { forwardRef, useEffect, useImperativeHandle, useRef } from "react";
 import type { RealmInput } from "./layout";
+import type { Person } from "./life";
 import type { RealmPick, RealmPlace, RealmReward, SavePalScene } from "./SavePalScene";
 
-export type RealmCanvasHandle = { focus(place: RealmPlace): void; zoom(dir: 1 | -1): void; fit(): void; celebrate(): void };
+export type RealmCanvasHandle = {
+  focus(place: RealmPlace): void; zoom(dir: 1 | -1): void; fit(): void; celebrate(): void;
+  walk(person: Person): void; stopWalk(): void; pad(x: number, y: number): void; enter(): void;
+};
 
 type Props = {
   input: RealmInput; rewards: RealmReward[];
   onPick(pick: RealmPick): void; onCollect(key: string, screen: { x: number; y: number }): void;
+  onNear(label: string | null): void;
 };
 
 export const RealmCanvas = forwardRef<RealmCanvasHandle, Props>(function RealmCanvas(props, ref) {
@@ -23,9 +29,13 @@ export const RealmCanvas = forwardRef<RealmCanvasHandle, Props>(function RealmCa
 
   useImperativeHandle(ref, () => ({
     focus: (place) => scene.current?.focusPlace(place),
-    zoom: (dir) => { const s = scene.current; if (s) s.zoomTarget = Math.max(.35, Math.min(3, s.zoomTarget * (dir > 0 ? 1.3 : 1 / 1.3))); },
-    fit: () => scene.current?.fitCamera(),
+    zoom: (dir) => scene.current?.zoomBy(dir),
+    fit: () => scene.current?.fitCamera(true),
     celebrate: () => scene.current?.celebrate(),
+    walk: (person) => scene.current?.startWalk(person),
+    stopWalk: () => scene.current?.stopWalk(),
+    pad: (x, y) => scene.current?.setWalkPad(x, y),
+    enter: () => scene.current?.enterNearest(),
   }), []);
 
   useEffect(() => {
@@ -34,15 +44,19 @@ export const RealmCanvas = forwardRef<RealmCanvasHandle, Props>(function RealmCa
     (async () => {
       const [{ default: Phaser }, { SavePalScene }] = await Promise.all([import("phaser"), import("./SavePalScene")]);
       if (disposed) return;
+      // Render at the screen's real pixel density (capped for very dense phones), shown at CSS size.
+      const dpr = Math.min(2, window.devicePixelRatio || 1);
       const s = new SavePalScene();
+      s.setDpr(dpr);
       s.onPick(pick => latest.current.onPick(pick));
       s.onCollect((key, at) => latest.current.onCollect(key, at));
+      s.onNear(label => latest.current.onNear(label));
       scene.current = s;
       if (process.env.NODE_ENV !== "production") (window as unknown as { __realm?: unknown }).__realm = s;
       game = new Phaser.Game({
-        type: Phaser.WEBGL, parent: el, width: el.clientWidth, height: el.clientHeight, backgroundColor: "#2e9fe0", scene: s,
-        scale: { mode: Phaser.Scale.RESIZE },
-        render: { antialias: false, pixelArt: true, roundPixels: true, clearBeforeRender: true },
+        type: Phaser.WEBGL, parent: el, width: Math.round(el.clientWidth * dpr), height: Math.round(el.clientHeight * dpr), backgroundColor: "#3a9bd5", scene: s,
+        scale: { mode: Phaser.Scale.NONE, zoom: 1 / dpr },
+        render: { antialias: true, antialiasGL: true, pixelArt: false, roundPixels: false, mipmapFilter: "LINEAR_MIPMAP_LINEAR", clearBeforeRender: true },
       });
       const hydrate = () => {
         if (disposed) return;
@@ -52,8 +66,9 @@ export const RealmCanvas = forwardRef<RealmCanvasHandle, Props>(function RealmCa
       game.events.once(Phaser.Core.Events.READY, () => { if (s.scene.isActive()) hydrate(); else s.events.once(Phaser.Scenes.Events.CREATE, hydrate); });
       observer = new ResizeObserver(([entry]) => {
         if (!entry || entry.contentRect.width <= 0 || entry.contentRect.height <= 0 || !game) return;
-        game.scale.resize(entry.contentRect.width, entry.contentRect.height);
-        s.resizeViewport(entry.contentRect.width, entry.contentRect.height);
+        const w = Math.round(entry.contentRect.width * dpr), h = Math.round(entry.contentRect.height * dpr);
+        game.scale.resize(w, h);
+        s.resizeViewport(w, h);
       });
       observer.observe(el);
     })();
@@ -65,5 +80,5 @@ export const RealmCanvas = forwardRef<RealmCanvasHandle, Props>(function RealmCa
   const rewardKey = props.rewards.map(r => r.key).join("|");
   useEffect(() => { scene.current?.setRewards(latest.current.rewards); }, [rewardKey]);
 
-  return <div ref={host} className="realm-world" aria-label="The Realm: your agreement as a city" />;
+  return <div ref={host} className="realm-world" aria-label="The Realm: your agreement as a kingdom" />;
 });
