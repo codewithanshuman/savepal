@@ -1,4 +1,4 @@
-import { BLOCK, CART, CHEST, G0, GRID, NATIVE_H, NATIVE_W, at, balustrade, box, quoins, pxLine, cone, contactShadow, cylinder, dome, flag, gableRoof, hipRoof, onLit, onShade, person, poly, project, shade, sprite, tree, type P } from "./engine";
+import { ROAD0, BLOCK, CART, CHEST, G0, GRID, NATIVE_H, NATIVE_W, at, balustrade, box, quoins, pxLine, cone, contactShadow, cylinder, dome, flag, gableRoof, hipRoof, onLit, onShade, person, poly, project, shade, sprite, tree, type P } from "./engine";
 
 /* Palettes per landmark, sharing one gold accent so the kingdom reads as one place. */
 const GOLD = "#e8b02a";
@@ -19,13 +19,21 @@ export type SceneState = {
   chestsSince: number; sealSince: number; paidSince: number;
   /** The landmark where the viewer's next real action waits; it gets a bouncing quest marker. */
   quest?: Landmark | null; hover?: Landmark | null;
+  /** Bounties paid (gold notices on the board) and when the latest landed; appeals at the customs house. */
+  bounties?: number; bountySince?: number; appealOpen?: boolean; refunded?: boolean; refundSince?: number;
+  /** How many quarter homes stand; the rest are building sites until the town levels up. */
+  built?: number; builtSince?: number;
+  /** When the helicopter last set out to deliver to the treasury (a PayPal payment or a collected reward). */
+  heliSince?: number;
 };
-export type Landmark = "castle" | "treasury" | "guild";
+export type Landmark = "castle" | "treasury" | "guild" | "market" | "harbour";
 /** Footprint and height of each landmark, for clicks, hover glow and the quest marker. */
 const LANDMARKS: Record<Landmark, { u0: number; v0: number; u1: number; v1: number; top: number }> = {
   castle: { u0: 1.6, v0: 1.9, u1: 5.4, v1: 5.1, top: 92 },
   treasury: { u0: 7.5, v0: 1.2, u1: 11.5, v1: 5.7, top: 128 },
   guild: { u0: 14, v0: 2.2, u1: 17, v1: 4.8, top: 70 },
+  market: { u0: 7.3, v0: 8.2, u1: 11.6, v1: 11.1, top: 30 },
+  harbour: { u0: 19.3, v0: 13.1, u1: 21.9, v1: 18, top: 34 },
 };
 /**
  * The town plan. Roads run every BLOCK tiles; each block has one purpose. Landmarks were
@@ -38,8 +46,14 @@ const blockBase = (b: number) => b * BLOCK + 1;
 const plotsIn = ([bu, bv]: Block): Array<[number, number]> => [[.55, .55], [2.95, .55], [.55, 2.95], [2.95, 2.95]].map(([du, dv]) => [blockBase(bu) + du, blockBase(bv) + dv]);
 /** Where delivered pages are built, nearest the market first. */
 export const PLOTS: Array<[number, number]> = [[0, 1], [2, 1], [1, 2]].flatMap(b => plotsIn(b as Block));
-const HOUSE_BLOCKS: Block[] = [[-1, 0], [-1, 1], [-1, 3], [0, 2], [2, 2], [0, 3], [2, 3]];
-const PARKS: Block[] = [[-1, 2], [1, 3], [3, 1]];
+/** Neighbourhoods, nearest the centre first. The outer ones fill as the town levels up. */
+const HOUSE_BLOCKS: Block[] = [[-1, 0], [-1, 1], [-1, 3], [0, 2], [2, 2], [0, 3], [2, 3],
+  [-2, 0], [-2, 1], [-2, 2], [-2, 3], [-1, -2], [0, -2], [2, -2], [3, -2], [-3, 0], [-3, 1], [-3, 2], [-3, 3], [-2, -2]];
+const PARKS: Block[] = [[-1, 2], [1, 3], [3, 1], [-3, -1]];
+const FARMS: Block[] = [[-1, -1], [0, -1], [1, -1], [-3, -3], [-2, -3], [-1, -3], [0, -3], [1, -3], [-3, -2]];
+const ORCHARDS: Block[] = [[2, -1], [3, -1], [2, -3], [3, -3], [-2, -1]];
+/** The helipad block, north of the treasury: the town's delivery helicopter lives here. */
+const PAD = { u: 9, v: -9 };
 const inBlock = (u: number, v: number, [bu, bv]: Block) => u >= blockBase(bu) && u < blockBase(bu) + 5 && v >= blockBase(bv) && v < blockBase(bv) + 5;
 export function landmarkBounds(l: Landmark) {
   const b = LANDMARKS[l];
@@ -47,8 +61,13 @@ export function landmarkBounds(l: Landmark) {
   return { x0: left.x, x1: right.x, y0: top.y, y1: bottom.y, cx: (left.x + right.x) / 2, top: top.y };
 }
 export function landmarkAt(x: number, y: number): Landmark | null {
-  for (const l of ["treasury", "guild", "castle"] as Landmark[]) { const b = landmarkBounds(l); if (x >= b.x0 && x <= b.x1 && y >= b.y0 && y <= b.y1) return l; }
+  for (const l of ["treasury", "guild", "castle", "harbour", "market"] as Landmark[]) { const b = landmarkBounds(l); if (x >= b.x0 && x <= b.x1 && y >= b.y0 && y <= b.y1) return l; }
   return null;
+}
+/** Where a reward bubble floats: above the building, or above the bounty board for the market. */
+export function bubbleAnchor(l: Landmark): P {
+  if (l === "market") return project(10.85, 10.5, 34);
+  const b = landmarkBounds(l); return { x: b.cx, y: b.top - 6 };
 }
 /** A pixel banner with "!" bobbing above the landmark that needs the viewer. */
 function questMarker(ctx: CanvasRenderingContext2D, l: Landmark, t: number) {
@@ -67,10 +86,10 @@ function hoverGlow(ctx: CanvasRenderingContext2D, l: Landmark) {
 
 /* ── terrain (static, rendered once and cached) ── */
 const isRoad = (u: number, v: number) =>
-  (((u % BLOCK === 0 && u > G0) && v > G0) || ((v % BLOCK === 0 && v > G0) && u > G0)) || (v === 15 && u >= 19 && u <= 23);
+  (((u % BLOCK === 0 && u >= ROAD0) && v >= ROAD0) || ((v % BLOCK === 0 && v >= ROAD0) && u >= ROAD0)) || (v === 15 && u >= 19 && u <= 23);
 const isPlaza = (u: number, v: number) => inBlock(u, v, [1, 1]);
 const isPond = (u: number, v: number) => PARKS.some(([bu, bv]) => u >= blockBase(bu) + 1 && u <= blockBase(bu) + 3 && v >= blockBase(bv) + 1 && v <= blockBase(bv) + 3);
-const isField = (u: number, v: number) => ([[-1, -1], [0, -1], [1, -1]] as Block[]).some(b => inBlock(u, v, b)) || (inBlock(u, v, [3, 0]) && !(u >= 20 && u <= 22 && v >= 2 && v <= 4));
+const isField = (u: number, v: number) => FARMS.some(b => inBlock(u, v, b)) || (inBlock(u, v, [3, 0]) && !(u >= 20 && u <= 22 && v >= 2 && v <= 4));
 const hash = (a: number, b: number) => { const x = Math.sin(a * 127.1 + b * 311.7) * 43758.5453; return x - Math.floor(x); };
 
 let terrainCache: HTMLCanvasElement | null = null;
@@ -440,17 +459,54 @@ function well(ctx: CanvasRenderingContext2D) {
   gableRoof(ctx, 8.12, 12.3, 8.88, 12.7, 18, 6, "#b5523b", "#6a4a2c");
 }
 
+/** The bounty board on the market square: one notice per bounty, gold once PayPal has paid it. */
+function bountyBoard(ctx: CanvasRenderingContext2D, paid: number, t: number, since: number) {
+  const u0 = 10.1, u1 = 11.6, v = 10.45;
+  [u0, u1 - .1].forEach(u => box(ctx, u, v, u + .1, v + .1, 0, 24, { base: "#5d4127" }));
+  box(ctx, u0 - .04, v, u1 + .04, v + .12, 8, 23, { base: "#8a6239" });
+  onLit(ctx, v + .12, u0 + .06, u1 - .06, 8.8, 22.2, "#5d4127");
+  gableRoof(ctx, u0 - .16, v - .16, u1 + .16, v + .3, 24, 5, "#c4553b", "#5d4127");
+  // the sign: a gold plank across the top
+  onLit(ctx, v + .121, u0 + .3, u1 - .3, 19.6, 22, "#e8b02a");
+  onLit(ctx, v + .122, u0 + .36, u1 - .36, 20.4, 21.2, "#7a4f12");
+  for (let i = 0; i < 6; i++) {
+    const col = i % 3, row = Math.floor(i / 3), uu = u0 + .14 + col * .42;
+    const z = 18.6 - row * 4.8, gold = i < paid, fresh = gold && i === paid - 1 && t - since < 2500 && Math.floor(t / 160) % 2 === 0;
+    onLit(ctx, v + .121, uu, uu + .34, z - 3.8, z, fresh ? "#fff8dc" : gold ? "#ffc439" : "#f4ead2");
+    onLit(ctx, v + .122, uu + .06, uu + .28, z - 2.6, z - 2.2, gold ? "#9a6a00" : "#b9ad93");
+    onLit(ctx, v + .122, uu + .06, uu + .22, z - 1.6, z - 1.2, gold ? "#9a6a00" : "#b9ad93");
+    onLit(ctx, v + .123, uu + .15, uu + .19, z - .7, z, "#c0392b");
+  }
+}
+/** A banner over the customs house: red while an appeal is open, green once a refund has sailed. */
+function customsBanner(ctx: CanvasRenderingContext2D, open: boolean, refunded: boolean, t: number) {
+  const base = project(20.6, 14, 27);
+  ctx.fillStyle = "#3a2a1c"; ctx.fillRect(Math.round(base.x), Math.round(base.y) - 18, 1, 18);
+  flag(ctx, Math.round(base.x) + 1, Math.round(base.y) - 18, open ? "#c0392b" : refunded ? "#1f9e62" : "#2f5fbe", t, 10);
+}
+/** Gold coins springing from the guild hall when a bounty lands. */
+function coinBurst(ctx: CanvasRenderingContext2D, t: number, since: number) {
+  const age = (t - since) / 1000; if (age < 0 || age > 2.4) return;
+  const c = project(15.5, 3.5, 60);
+  for (let i = 0; i < 14; i++) {
+    const a = i / 14 * Math.PI * 2, r = age * 26, x = c.x + Math.cos(a) * r, y = c.y + Math.sin(a) * r * .5 - age * 18 + age * age * 16;
+    ctx.globalAlpha = Math.max(0, 1 - age / 2.4);
+    ctx.fillStyle = "#ffc439"; ctx.fillRect(Math.round(x) - 1, Math.round(y) - 1, 3, 3); ctx.fillStyle = "#fff3c4"; ctx.fillRect(Math.round(x) - 1, Math.round(y) - 1, 1, 1);
+  }
+  ctx.globalAlpha = 1;
+}
+
 /* ── the frame ── */
 type Drawable = { depth: number; draw: () => void };
 const TREES: Array<[number, number]> = (() => {
   const t: Array<[number, number]> = [];
   // the royal forest along the far shores
   for (let v = G0 + .5; v < GRID; v += 1.2) for (let u = G0 + .5; u < GRID; u += 1.2) {
-    if (u >= -6 && v >= -6) continue;
+    if (u >= ROAD0 - .5 && v >= ROAD0 - .5) continue;
     const j = hash(Math.round(u * 10), Math.round(v * 10)); if (j > .18) t.push([u + j * .45, v + hash(Math.round(v * 7), Math.round(u * 3)) * .45]);
   }
   // orchards: fruit trees in straight rows
-  for (const [bu, bv] of [[2, -1], [3, -1]] as Block[]) for (let dv = .6; dv < 5; dv += 1.25) for (let du = .6; du < 5; du += 1.25) t.push([blockBase(bu) + du, blockBase(bv) + dv]);
+  for (const [bu, bv] of ORCHARDS) for (let dv = .6; dv < 5; dv += 1.25) for (let du = .6; du < 5; du += 1.25) t.push([blockBase(bu) + du, blockBase(bv) + dv]);
   // parks: a ring of trees around each pond
   for (const [bu, bv] of PARKS) { const b0 = blockBase(bu), c0 = blockBase(bv); for (let k = .5; k < 5; k += 1) { t.push([b0 + k, c0 + .35], [b0 + .35, c0 + k]); if (k > 1) t.push([b0 + k, c0 + 4.6], [b0 + 4.6, c0 + k]); } }
   // planters at the corners of the market square, and a coastal copse
@@ -460,7 +516,110 @@ const TREES: Array<[number, number]> = (() => {
 })();
 /** Townsfolk homes that make the other blocks real neighbourhoods; they carry no data. */
 const QUARTER: House[] = HOUSE_BLOCKS.flatMap(b => plotsIn(b)).map(([u, v], k) => ({ path: "", title: null, status: 200, u, v, s: 1.55 + hash(k, 5) * .15, floors: 1 + Math.round(hash(k, 9) * 1.4) }));
-const VILLAGERS = [{ road: .5, speed: .02, phase: .1, tunic: "#c47a2c" }, { road: 12.5, speed: .018, phase: .55, tunic: "#7a5aa8" }, { road: 6.5, speed: .016, phase: .8, tunic: "#3f8f83" }, { road: 18.5, speed: .017, phase: .3, tunic: "#b0463f" }, { road: -5.5, speed: .02, phase: .65, tunic: "#2f5fbe" }, { road: 12.5, speed: .014, phase: .2, tunic: "#d08a2b" }];
+/** Homes nearest the market square are built first, so the town grows outward from its centre. */
+const RANK_OF = new Map(QUARTER.map((h, i) => [i, Math.hypot(h.u - 9, h.v - 9)] as const).sort((a, b) => a[1] - b[1]).map(([i], r) => [i, r]));
+export const QUARTER_COUNT = QUARTER.length;
+/** A plot for later: mown grass, hedged corners and a little "for sale" post. */
+function lot(ctx: CanvasRenderingContext2D, h: House) {
+  const { u, v, s } = h;
+  for (const [a, b] of [[u, v], [u + s - .25, v], [u, v + s - .25], [u + s - .25, v + s - .25]]) box(ctx, a, b, a + .25, b + .25, 0, 4, { base: "#4f9a3a" });
+  box(ctx, u + s - .5, v + s - .1, u + s - .44, v + s - .04, 0, 12, { base: "#6a4a2c" });
+  onLit(ctx, v + s - .03, u + s - .78, u + s - .2, 8, 13, "#f4ead2");
+  onLit(ctx, v + s - .02, u + s - .7, u + s - .28, 10, 11, "#c0392b");
+}
+/** The helipad: a concrete pad with a painted ring and H, a hangar, landing lights and a windsock. */
+function helipad(ctx: CanvasRenderingContext2D, t: number) {
+  const { u, v } = PAD;
+  poly(ctx, [project(u - 1.6, v - 1.6), project(u + 1.6, v - 1.6), project(u + 1.6, v + 1.6), project(u - 1.6, v + 1.6)], "#8b95a3");
+  poly(ctx, [project(u - 1.45, v - 1.45), project(u + 1.45, v - 1.45), project(u + 1.45, v + 1.45), project(u - 1.45, v + 1.45)], "#9aa4b1");
+  const c = project(u, v);
+  ctx.strokeStyle = "#ffc439"; ctx.lineWidth = 2; ctx.beginPath(); ctx.ellipse(c.x, c.y, 34, 17, 0, 0, Math.PI * 2); ctx.stroke();
+  const bar = (u0: number, v0: number, u1: number, v1: number) => poly(ctx, [project(u0, v0), project(u1, v0), project(u1, v1), project(u0, v1)], "#f4f6f8");
+  bar(u - .55, v - .5, u - .35, v + .5); bar(u + .35, v - .5, u + .55, v + .5); bar(u - .35, v - .1, u + .35, v + .1);
+  const blink = Math.floor(t / 500) % 2;
+  for (const [a, b] of [[u - 1.5, v - 1.5], [u + 1.4, v - 1.5], [u - 1.5, v + 1.4], [u + 1.4, v + 1.4]]) box(ctx, a, b, a + .1, b + .1, 0, 3, { base: blink ? "#ff5a4a" : "#7a2a22" });
+  // the hangar and its windsock
+  box(ctx, u - 3.4, v - 1.6, u - 1.9, v + 1.4, 0, 22, { base: "#c9ced6" });
+  onLit(ctx, v + 1.4, u - 3.2, u - 2.1, 0, 16, "#4b5563");
+  for (let z = 2; z < 16; z += 2) onLit(ctx, v + 1.401, u - 3.2, u - 2.1, z, z + .5, "#6b7480");
+  gableRoof(ctx, u - 3.5, v - 1.7, u - 1.8, v + 1.5, 22, 8, "#2f5fbe", "#c9ced6");
+  const pole = project(u + 2, v - 1.2);
+  ctx.fillStyle = "#5d6470"; ctx.fillRect(Math.round(pole.x), Math.round(pole.y) - 22, 1, 22);
+  const sway = Math.round(Math.sin(t / 400) * 1.5);
+  ctx.fillStyle = "#ff7a2f"; ctx.fillRect(Math.round(pole.x) + 1, Math.round(pole.y) - 22 + sway, 4, 3);
+  ctx.fillStyle = "#ffffff"; ctx.fillRect(Math.round(pole.x) + 5, Math.round(pole.y) - 21 + sway, 3, 2);
+  ctx.fillStyle = "#ff7a2f"; ctx.fillRect(Math.round(pole.x) + 8, Math.round(pole.y) - 21 + sway, 2, 2);
+}
+type Heli = { u: number; v: number; z: number; flip: boolean; spin: boolean };
+const TREASURY_AT = { u: 9.5, v: 3.45 };
+const lerpP = (a: { u: number; v: number }, b: { u: number; v: number }, f: number) => ({ u: a.u + (b.u - a.u) * f, v: a.v + (b.v - a.v) * f });
+const ease = (f: number) => f < .5 ? 2 * f * f : 1 - Math.pow(-2 * f + 2, 2) / 2;
+/** Where the helicopter is: a delivery run to the treasury when money moves, otherwise a patrol lap every 50 seconds. */
+function heliAt(s: SceneState, t: number): Heli {
+  const pad = { u: PAD.u, v: PAD.v }, cruise = 150;
+  const d = s.heliSince ? (t - s.heliSince) / 1000 : Infinity;
+  if (d < 10) {
+    const over = { u: TREASURY_AT.u, v: TREASURY_AT.v };
+    if (d < 1) return { ...pad, z: ease(d) * cruise, flip: false, spin: true };
+    if (d < 4) { const p = lerpP(pad, over, ease((d - 1) / 3)); return { ...p, z: cruise, flip: false, spin: true }; }
+    if (d < 6) return { ...over, z: cruise - Math.sin((d - 4) / 2 * Math.PI) * 14, flip: false, spin: true };
+    if (d < 9) { const p = lerpP(over, pad, ease((d - 6) / 3)); return { ...p, z: cruise, flip: true, spin: true }; }
+    return { ...pad, z: (1 - ease(d - 9)) * cruise, flip: true, spin: true };
+  }
+  const c = (t / 1000) % 50;
+  if (c >= 20) return { ...pad, z: 0, flip: false, spin: c < 22 };
+  const centre = { u: 6, v: 6 }, r = 15, start = { u: centre.u, v: centre.v - r };
+  if (c < 1.5) return { ...pad, z: ease(c / 1.5) * cruise, flip: false, spin: true };
+  if (c < 4) { const p = lerpP(pad, start, ease((c - 1.5) / 2.5)); return { ...p, z: cruise, flip: p.u < pad.u, spin: true }; }
+  if (c < 16) { const a = -Math.PI / 2 + (c - 4) / 12 * Math.PI * 2; return { u: centre.u + Math.cos(a) * r, v: centre.v + Math.sin(a) * r, z: cruise + Math.sin(a * 2) * 10, flip: Math.sin(a) - Math.cos(a) < 0, spin: true }; }
+  if (c < 18.5) { const p = lerpP(start, pad, ease((c - 16) / 2.5)); return { ...p, z: cruise, flip: false, spin: true }; }
+  return { ...pad, z: (1 - ease((c - 18.5) / 1.5)) * cruise, flip: false, spin: true };
+}
+/** A little pixel helicopter: blue body with a gold stripe, glass nose, tail rotor and skids. */
+function helicopter(ctx: CanvasRenderingContext2D, h: Heli, t: number) {
+  const g = project(h.u, h.v), p = project(h.u, h.v, h.z), x = Math.round(p.x), y = Math.round(p.y) - 6, f = h.flip ? -1 : 1;
+  const sh = Math.max(.15, .35 - h.z / 600), sw = Math.max(8, 16 - h.z / 20);
+  ctx.fillStyle = `rgba(20,40,10,${sh})`; ctx.beginPath(); ctx.ellipse(g.x, g.y, sw, sw / 2, 0, 0, Math.PI * 2); ctx.fill();
+  const px = (dx: number, dy: number, w: number, hh: number, col: string) => { ctx.fillStyle = col; ctx.fillRect(f > 0 ? x + dx : x - dx - w, y + dy, w, hh); };
+  px(-17, -4, 12, 2, "#1d4f9c"); px(-19, -8, 3, 6, "#1d4f9c"); // tail boom and fin
+  const tr = h.spin && Math.floor(t / 40) % 2; px(-21, tr ? -9 : -6, 1, 5, "#dfe6f2");
+  px(-7, -7, 15, 8, "#2f6fdc"); px(-6, -8, 12, 1, "#3f7fe6"); px(-7, -3, 15, 2, "#ffc439");
+  px(4, -7, 5, 4, "#9fd8ff"); px(5, -6, 2, 1, "#e8f6ff"); px(-6, 1, 13, 1, "#1d4f9c");
+  px(-5, 3, 1, 2, "#3a4250"); px(4, 3, 1, 2, "#3a4250"); px(-8, 5, 16, 1, "#3a4250");
+  px(-1, -10, 2, 2, "#3a4250");
+  // main rotor: a spinning blade, or still and long when parked
+  if (h.spin) { const k = Math.abs(Math.cos(t / 35)) * 18 + 4; ctx.fillStyle = "rgba(230,236,245,.85)"; ctx.fillRect(x - Math.round(k), y - 11, Math.round(k) * 2, 1); ctx.fillStyle = "rgba(230,236,245,.35)"; ctx.fillRect(x - 20, y - 11, 40, 1); }
+  else { ctx.fillStyle = "#3a4250"; ctx.fillRect(x - 18, y - 11, 36, 1); }
+}
+/** Gulls drifting across the sky in loose flocks. */
+function birds(ctx: CanvasRenderingContext2D, t: number) {
+  ctx.fillStyle = "#f4f6f8";
+  for (let f = 0; f < 2; f++) {
+    const span = NATIVE_W + 200, bx = ((t / 1000 * (18 + f * 7) + f * 700) % span) - 100, by = 120 + f * 260 + Math.sin(t / 3000 + f) * 20;
+    for (let i = 0; i < 5; i++) {
+      const x = Math.round(bx - i * 14 + (i % 2) * 4), y = Math.round(by + Math.abs(i - 2) * 6), up = Math.floor(t / 180 + i) % 2;
+      ctx.fillRect(x - 3, y - (up ? 1 : 0), 3, 1); ctx.fillRect(x + 1, y - (up ? 1 : 0), 3, 1); ctx.fillRect(x, y, 1, 1);
+    }
+  }
+}
+/** A plot under construction: foundation, half-built walls, scaffolding and a pile of bricks. */
+function site(ctx: CanvasRenderingContext2D, h: House, t: number, k: number) {
+  const { u, v, s } = h, a = u + .2, b = v + .2, c = u + s - .2, d = v + s - .2;
+  poly(ctx, [project(u, v), project(u + s, v), project(u + s, v + s), project(u, v + s)], "#c2a476");
+  box(ctx, a, b, c, d, 0, 3, { base: "#b3ab9b" });
+  const rise = 6 + (k % 3) * 3;
+  box(ctx, a + .08, b + .08, c - .08, d - .08, 3, 3 + rise, { base: "#eadfcb" });
+  onLit(ctx, d - .08, a + .4, a + .75, 3, 3 + Math.min(rise, 8), "#5a4632");
+  for (const [pu, pv] of [[a - .1, b - .1], [c + .02, b - .1], [a - .1, d + .02], [c + .02, d + .02]]) box(ctx, pu, pv, pu + .07, pv + .07, 0, 24, { base: "#8a6239" });
+  for (const z of [12, 23]) { onLit(ctx, d + .09, a - .1, c + .09, z, z + 1, "#a0743f"); onShade(ctx, c + .09, b - .1, d + .09, z, z + 1, "#7d5a36"); }
+  box(ctx, u + .02, v + s - .42, u + .38, v + s - .06, 0, 3, { base: "#b0463f" });
+  box(ctx, u + .08, v + s - .36, u + .32, v + s - .12, 3, 5, { base: "#c4553b" });
+  // a builder at work, hammering on the near corner
+  const p = project(c + .25, d + .3), swing = Math.floor((t + k * 300) / 260) % 2;
+  sprite(ctx, person("artisan", "#d08a2b", swing as 0 | 1), p.x, p.y, k % 2 === 0);
+}
+
+const VILLAGERS = [{ road: .5, speed: .016, phase: .1, tunic: "#c47a2c" }, { road: 12.5, speed: .015, phase: .55, tunic: "#7a5aa8" }, { road: 6.5, speed: .013, phase: .8, tunic: "#3f8f83" }, { road: 18.5, speed: .014, phase: .3, tunic: "#b0463f" }, { road: -5.5, speed: .016, phase: .65, tunic: "#2f5fbe" }, { road: 12.5, speed: .012, phase: .2, tunic: "#d08a2b" }, { road: -11.5, speed: .014, phase: .4, tunic: "#5a7d3a" }, { road: -17.5, speed: .012, phase: .9, tunic: "#c0392b" }, { road: 0.5, speed: .011, phase: .7, tunic: "#7a5aa8" }];
 
 export function drawScene(ctx: CanvasRenderingContext2D, s: SceneState, t: number) {
   sea(ctx, t);
@@ -470,7 +629,8 @@ export function drawScene(ctx: CanvasRenderingContext2D, s: SceneState, t: numbe
   // contact shadows first, so no shadow paints over a neighbour
   for (const [key, u0, v0, u1, v1] of [["castle", 1.6, 4.4, 5.4, 7.6], ["treasury", 6.8, 4.4, 10.8, 8.4], ["guild", 12, 5, 15, 7.6]] as const) at(PLACE[key][0], PLACE[key][1], () => contactShadow(ctx, u0, v0, u1, v1));
   const spare = PLOTS.slice(s.houses.length).map(([u, v], k) => ({ path: "", title: null, status: 200, u, v, s: 1.5, floors: 1 + (k % 2) }));
-  [...spare, ...QUARTER].forEach(h => contactShadow(ctx, h.u, h.v, h.u + h.s, h.v + h.s));
+  const standing = (i: number) => (RANK_OF.get(i) ?? 0) < (s.built ?? QUARTER.length);
+  [...spare, ...QUARTER.filter((_, i) => standing(i))].forEach(h => contactShadow(ctx, h.u, h.v, h.u + h.s, h.v + h.s));
   if (s.hover) hoverGlow(ctx, s.hover);
   s.houses.forEach(h => contactShadow(ctx, h.u, h.v, h.u + h.s, h.v + h.s));
   const frame = (moving: boolean) => (moving ? Math.floor(t / 170) % 2 : 0) as 0 | 1;
@@ -487,14 +647,26 @@ export function drawScene(ctx: CanvasRenderingContext2D, s: SceneState, t: numbe
     placed("harbour", 21.3 + 14.4 + .6, () => lighthouse(ctx, t)),
     { depth: 19.5 + 13.3 + 3.6, draw: () => warehouse(ctx, 19.5, 13.3) },
     { depth: 19.5 + 16.4 + 3.6, draw: () => warehouse(ctx, 19.5, 16.4) },
+    { depth: 19.5 + 13.3 + 3.7, draw: () => customsBanner(ctx, !!s.appealOpen, !!s.refunded, t) },
+    { depth: 10.9 + 10.5 + .3, draw: () => bountyBoard(ctx, s.bounties ?? 0, t, s.bountySince ?? 0) },
   ];
   s.houses.forEach((h, i) => items.push({ depth: h.u + h.v + 2 * h.s, draw: () => house(ctx, h, i, s, t) }));
-  [...spare, ...QUARTER].forEach((h, i) => items.push({ depth: h.u + h.v + 2 * h.s, draw: () => house(ctx, h, i + 5, s, t) }));
+  spare.forEach((h, i) => items.push({ depth: h.u + h.v + 2 * h.s, draw: () => house(ctx, h, i + 5, s, t) }));
+  const rank = (i: number) => (RANK_OF.get(i) ?? 0) - (s.built ?? QUARTER.length);
+  QUARTER.forEach((h, i) => items.push({ depth: h.u + h.v + 2 * h.s, draw: () => standing(i) ? house(ctx, h, i + 5 + spare.length, s, t) : rank(i) < 4 ? site(ctx, h, t, i) : lot(ctx, h) }));
+  items.push({ depth: PAD.u + PAD.v - 1.4, draw: () => helipad(ctx, t) });
+  const heli = heliAt(s, t);
+  if (heli.z < 2) items.push({ depth: heli.u + heli.v + .5, draw: () => helicopter(ctx, heli, t) });
   TREES.forEach(([u, v], i) => items.push({ depth: u + v, draw: () => tree(ctx, u, v, i) }));
   // ships: the guild's galleon at the pier sails out carrying the gold once it is released
   const sailing = s.paid ? Math.min(1, (t - s.paidSince) / 9000) : 0;
   const galleonU = 26.8 + sailing * 9, galleonV = 16.9 + sailing * 4;
   items.push({ depth: galleonU + galleonV, draw: () => ship(ctx, galleonU, galleonV, true, t, { cargo: s.paid, flagColor: "#1f9e62", hull: "#3d2a1c" }) });
+  // a granted appeal: a cutter carries the refunded gold back west to the client
+  if (s.refunded && s.refundSince !== undefined) {
+    const f = Math.min(1, (t - s.refundSince) / 10000), ru = 24 - f * 22, rv = 19 + f * 8.5;
+    if (f < 1) items.push({ depth: ru + rv, draw: () => { ctx.globalAlpha = Math.min(1, (1 - f) * 6); ship(ctx, ru, rv, true, t, { cargo: true, flagColor: "#2f5fbe", hull: "#2a3348", scale: .7 }); ctx.globalAlpha = 1; } });
+  }
   // two trading ships on loops that stay inside the visible sea, fading in and out at each end
   const voyage = (speed: number, offset: number, from: number, to: number) => { const f = ((t / 1000 * speed + offset) % (to - from)) / (to - from); return { at: from + f * (to - from), alpha: Math.min(1, f * 8, (1 - f) * 8) }; };
   const a = voyage(.32, 0, -10, 30), b = voyage(.25, 11, -12, 26);
@@ -504,7 +676,7 @@ export function drawScene(ctx: CanvasRenderingContext2D, s: SceneState, t: numbe
   items.push({ depth: 3.5 + 5.25, draw: () => { const p = project(3.5, 5.25); sprite(ctx, person("king", "#2f5fbe", 0), p.x, p.y); } });
   items.push({ depth: 15.5 + 5, draw: () => { const p = project(15.5, 5); sprite(ctx, person("artisan", "#5a7d3a", 0), p.x, p.y, true); } });
   VILLAGERS.forEach(vl => {
-    const x = (t / 1000 * vl.speed + vl.phase) % 2, dir = x < 1 ? 1 : -1, u = -11 + 34 * (x < 1 ? x : 2 - x);
+    const x = (t / 1000 * vl.speed + vl.phase) % 2, dir = x < 1 ? 1 : -1, u = ROAD0 + .5 + 41 * (x < 1 ? x : 2 - x);
     if (vl.road === 6.5 && Math.abs(u - s.cartU) < .8) return;
     items.push({ depth: u + vl.road + .2, draw: () => { const p = project(u, vl.road + .2); sprite(ctx, person("artisan", vl.tunic, frame(true)), p.x, p.y, dir < 0); } });
   });
@@ -519,6 +691,9 @@ export function drawScene(ctx: CanvasRenderingContext2D, s: SceneState, t: numbe
     sprite(ctx, person("inspector", w.tunic, frame(w.moving)), p.x, p.y, w.flip);
   } }));
   items.sort((a, b) => a.depth - b.depth).forEach(i => i.draw());
+  if (heli.z >= 2) helicopter(ctx, heli, t);
+  birds(ctx, t);
+  if (s.bountySince) coinBurst(ctx, t, s.bountySince);
   if (s.quest) questMarker(ctx, s.quest, t);
 }
 

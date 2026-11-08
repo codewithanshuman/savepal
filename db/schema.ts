@@ -46,6 +46,7 @@ export const projects = sqliteTable("projects", {
   fundingAuthorizeRequestId: text("funding_authorize_request_id"),
   fundingHeldAt: text("funding_held_at"),
   fundingExpiresAt: text("funding_expires_at"),
+  fundingRenewedAt: text("funding_renewed_at"),
   createdAt: text("created_at").notNull(),
   updatedAt: text("updated_at").notNull(),
 });
@@ -207,4 +208,34 @@ export const crewEvents = sqliteTable("crew_events", {
   verdict: text("verdict"),
   text: text("text").notNull(),
   createdAt: text("created_at").notNull(),
+});
+
+/** A bonus the client pays the freelancer on top of the agreement: its own PayPal checkout (capture). */
+export const bounties = sqliteTable("bounties", {
+  id: text("id").primaryKey(),
+  projectId: text("project_id").notNull(),
+  amountCents: integer("amount_cents").notNull(),
+  currency: text("currency").notNull(),
+  note: text("note").notNull(),
+  createdBy: text("created_by").notNull(),
+  paypalOrderId: text("paypal_order_id"),
+  paypalCaptureId: text("paypal_capture_id"),
+  status: text("status").notNull(),
+  createdAt: text("created_at").notNull(),
+  updatedAt: text("updated_at").notNull(),
+});
+
+/** A client's appeal after payment; the freelancer grants it with a real PayPal refund, or answers it. */
+export const appeals = sqliteTable("appeals", {
+  id: text("id").primaryKey(),
+  projectId: text("project_id").notNull(),
+  amountCents: integer("amount_cents").notNull(),
+  reason: text("reason").notNull(),
+  filedBy: text("filed_by").notNull(),
+  status: text("status").notNull(),
+  reply: text("reply"),
+  paypalRefundId: text("paypal_refund_id"),
+  refundStatus: text("refund_status"),
+  createdAt: text("created_at").notNull(),
+  resolvedAt: text("resolved_at"),
 });

@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect } from "react";
+import { useEffect, useRef } from "react";
 
 type PayPal = { Buttons: (options: { createOrder: () => Promise<string>; onApprove: (data: { orderID: string }) => Promise<void>; onError: (error: Error) => void; style: { layout: string; color: string; shape: string; label: string; height?: number } }) => { render: (selector: string) => Promise<void> } };
 declare global { interface Window { paypal?: PayPal } }
@@ -15,11 +15,16 @@ async function api(payload: Record<string, unknown>) {
 /**
  * PayPal Smart Buttons. "pay": one-step checkout after approval. "hold": fund first, where the buyer's
  * approval places a PayPal authorization that SavePal captures only after the work is approved.
+ * "bounty": a bonus paid on top, with its amount and note read from `extra` when the buyer clicks.
  */
-export default function PayPalCheckout({ project, clientId, merchantId, bnCode, mode = "pay", onPaid, onError, tone = "gold" }: { project: { id: string }; tone?: "gold" | "black"; clientId: string; merchantId?: string; bnCode?: string | null; mode?: "pay" | "hold"; onPaid: () => void; onError: (message: string) => void }) {
+export default function PayPalCheckout({ project, clientId, merchantId, bnCode, mode = "pay", extra, onPaid, onError, tone = "gold" }: { project: { id: string }; tone?: "gold" | "black"; clientId: string; merchantId?: string; bnCode?: string | null; mode?: "pay" | "hold" | "bounty"; extra?: () => Record<string, unknown>; onPaid: () => void; onError: (message: string) => void }) {
+  const extraRef = useRef(extra);
+  extraRef.current = extra;
   useEffect(() => {
     let cancelled = false;
-    const actions = mode === "hold" ? { create: "fund_order", approve: "fund_authorize", done: ["HELD", "PENDING"] } : { create: "create_order", approve: "capture_order", done: ["COMPLETED"] };
+    const actions = mode === "hold" ? { create: "fund_order", approve: "fund_authorize", done: ["HELD", "PENDING"] }
+      : mode === "bounty" ? { create: "bounty_order", approve: "bounty_capture", done: ["COMPLETED"] }
+      : { create: "create_order", approve: "capture_order", done: ["COMPLETED"] };
     const start = async () => {
       const sdkUrl = `https://www.paypal.com/sdk/js?client-id=${encodeURIComponent(clientId)}&currency=USD&intent=${mode === "hold" ? "authorize" : "capture"}${merchantId ? `&merchant-id=${encodeURIComponent(merchantId)}` : ""}`;
       const previous = document.querySelector<HTMLScriptElement>('script[data-savepal-paypal="true"]');
@@ -36,7 +41,7 @@ export default function PayPalCheckout({ project, clientId, merchantId, bnCode, 
       const host = document.getElementById("paypal-button"); if (host) host.innerHTML = "";
       await window.paypal.Buttons({
         createOrder: async () => {
-          const result = await api({ action: actions.create, id: project.id });
+          const result = await api({ ...(extraRef.current?.() ?? {}), action: actions.create, id: project.id });
           if (!result.orderId) throw new Error("PayPal order ID is missing");
           return result.orderId;
         },

@@ -488,3 +488,14 @@ button.d-tile.on{box-shadow:0 0 0 2px var(--d-pp2),var(--d-sh)}
   .d-head-actions .d-btn{flex:1}
 }
 @media (prefers-reduced-motion:reduce){.d-hc-inner{transition:none!important}}
+
+/* Realm powers strip */
+.d-powers{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:10px;margin:0 0 16px}
+.d-powers a{display:flex;align-items:center;gap:10px;padding:12px 14px;border-radius:14px;background:var(--d-card,#fff);border:1px solid var(--d-line,#e7e9ee);color:inherit;text-decoration:none;transition:transform .15s,border-color .15s}
+.d-powers a:hover{transform:translateY(-1px);border-color:#ffc439}
+.d-powers a i{display:grid;place-items:center;width:32px;height:32px;border-radius:10px;background:#fff6d6;color:#9a6a00;flex:none}
+.d-powers a span{display:flex;flex-direction:column;font-size:14px;font-weight:600;min-width:0;flex:1}
+.d-powers a small{font-size:11px;font-weight:600;color:#7a8394;text-transform:uppercase;letter-spacing:.06em}
+.d-powers a svg:last-child{color:#9aa3b2;flex:none}
+.d-powers a.hot{border-color:#e3574a;background:#fff4f2}
+.d-powers a.hot i{background:#ffe1dc;color:#c0392b}

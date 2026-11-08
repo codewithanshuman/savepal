@@ -4,11 +4,14 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import PayPalCheckout from "../../paypal-checkout";
 import { CORE, NATIVE_H, NATIVE_W, project } from "./engine";
 import { setSfxEnabled, sfx, sfxEnabled } from "./sfx";
-import { PLOTS, drawScene, houseBounds, landmarkAt, landmarkBounds, type House, type Landmark, type SceneState, type Verdict, type Walker } from "./scene";
+import { UNLOCKS, housesBuilt, isPaid, levelFor, rewards, type Reward } from "./progress";
+import { PLOTS, QUARTER_COUNT, bubbleAnchor, drawScene, houseBounds, landmarkAt, landmarkBounds, type House, type Landmark, type SceneState, type Verdict, type Walker } from "./scene";
 
 /* The Realm: one agreement as a small kingdom, and a place where the work actually happens.
  * Castle = the client's throne room (checks, approval), treasury = the PayPal hold (fund, release,
- * recall), guild hall = the freelancer (accept, deliver). Every action here is the real API call. */
+ * recall, renew), guild hall = the freelancer (accept, deliver), bounty board = bonuses paid through
+ * their own PayPal checkout, customs house = appeals that end in a real PayPal refund.
+ * Every action here is the real API call. */
 
 type Criterion = { label: string; kind: string; needle?: string; required?: boolean };
 type Gate = { mode: "CLEAR" | "CONFIRM" | "OVERRIDE"; verified: number; total: number; minimumReason: number; blocking: Array<{ index: number }>; unconfirmed: unknown[]; advisory: unknown[] };
@@ -19,7 +22,15 @@ type Project = {
   consent: { termsHash: string; fingerprint: string; tampered: boolean; legacy: boolean };
   revisions: { remaining: number | null; exhausted: boolean };
   paypal_order_id: string | null; paypal_capture_id: string | null; seller_merchant_id: string | null;
-  funding: { mode: string; status: string; expiresAt: string | null; canFund: boolean; canRelease: boolean; canVoid: { allowed: boolean } };
+  funding: { mode: string; status: string; heldAt: string | null; expiresAt: string | null; canFund: boolean; canRelease: boolean; canVoid: { allowed: boolean } };
+  realm: RealmPowers;
+};
+type Bounty = { id: string; amount_cents: number; note: string; status: string; paypal_capture_id: string | null; created_at: string };
+type Appeal = { id: string; amount_cents: number; reason: string; status: string; reply: string | null; paypal_refund_id: string | null; created_at: string; resolved_at: string | null };
+type RealmPowers = {
+  bounties: Bounty[]; bountyCents: number; canBounty: boolean;
+  appeals: Appeal[]; openAppeal: Appeal | null; refundedCents: number; refundableCents: number; canAppeal: boolean;
+  renew: { allowed: boolean; from: string | null; reason?: string; renewedAt: string | null } | null;
 };
 type ListData = { projects: Project[]; crewReady?: boolean; paypalReady: boolean; paypalClientId: string | null; paypalPartnerBnCode: string | null; paymentMode: "SELLER" | "MERCHANT"; user: { name: string; email: string; avatar: string | null } };
 type ManifestPage = { url: string; status: number; title: string | null; bytes: number };
@@ -34,10 +45,12 @@ const LEDGER: Record<string, string> = {
   PAYPAL_HOLD_ORDER_CREATED: "PayPal order opened", FUNDS_PENDING: "PayPal reviewing the hold", FUNDS_HELD: "Gold locked by PayPal",
   FUNDS_RELEASED: "Gold released to the guild", FUNDS_RETURNED: "Hold recalled", FUNDS_STATUS_CHANGED: "PayPal sent word", CLIENT_APPROVED: "Decree sealed",
   PAYPAL_ORDER_CREATED: "PayPal order opened", CAPTURE_CONFIRMED: "PayPal confirmed the payment",
+  FUNDS_RENEWED: "PayPal renewed the hold", BOUNTY_PAID: "Bounty paid", REFUND_ISSUED: "Refund sailed to the client",
 };
 const CREW_HUES = ["#2f5fbe", "#7a5aa8", "#1f9e62"];
 const ISLAND = CORE;
-const NAMES: Record<Landmark, string> = { castle: "THRONE ROOM", treasury: "ROYAL TREASURY", guild: "GUILD HALL" };
+const NAMES: Record<Landmark, string> = { castle: "THRONE ROOM", treasury: "ROYAL TREASURY", guild: "GUILD HALL", market: "BOUNTY BOARD", harbour: "CUSTOMS HOUSE" };
+const short = (iso: string) => new Date(iso).toLocaleDateString("en-US", { month: "short", day: "numeric" });
 
 async function api(payload: Record<string, unknown>) {
   const res = await fetch("/api/workspace", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload) });
@@ -49,6 +62,7 @@ async function api(payload: Record<string, unknown>) {
 /** Where the viewer's next real action lives. */
 function questFor(p: Project): Landmark | null {
   const paid = p.funding.status === "CAPTURED" || PAID.includes(p.payment_status);
+  if (p.realm?.openAppeal && p.role === "freelancer") return "harbour";
   if (paid || p.consent.tampered) return null;
   if (p.role === "client") {
     if (p.funding.mode === "HOLD" && p.funding.canFund) return "treasury";
@@ -78,6 +92,10 @@ export default function Realm({ id }: { id: string }) {
   const [cam, setCam] = useState({ k: 0, x: 0, y: 0 });
   const [logOpen, setLogOpen] = useState(true);
   const [sound, setSound] = useState(true);
+  const [seen, setSeen] = useState<Set<string> | null>(null);
+  const [levelUp, setLevelUp] = useState<number | null>(null);
+  const [ordersOpen, setOrdersOpen] = useState(true);
+  const [pops, setPops] = useState<Array<{ id: number; x: number; y: number; xp: number }>>([]);
   useEffect(() => { setSound(sfxEnabled()); }, []);
   const toggleSound = () => { const on = !sound; setSfxEnabled(on); setSound(on); if (on) sfx.click(); };
   /** Opening a building plays its door; closing plays it backwards. */
@@ -125,18 +143,23 @@ export default function Realm({ id }: { id: string }) {
     try {
       await api({ ...payload, id }); await loadProject(); setNotice(done);
       const a = payload.action;
-      if (a === "release_funds") { sfx.coins(); setTimeout(sfx.horn, 450); }
+      if (a === "release_funds") { fly(); sfx.coins(); setTimeout(sfx.horn, 450); }
       else if (a === "approve" || a === "accept") sfx.seal();
       else if (a === "submit") sfx.chest();
       else if (a === "verify") sfx.quest();
-      else if (a === "void_hold" || a === "revise") sfx.close();
+      else if (a === "void_hold" || a === "revise" || a === "appeal_withdraw") sfx.close();
+      else if (a === "hold_renew") sfx.seal();
+      else if (a === "appeal_file") sfx.horn();
+      else if (a === "appeal_answer") { if (payload.decision === "grant") { sfx.coins(); setTimeout(sfx.horn, 450); } else sfx.close(); }
       else sfx.click();
     }
     catch (e) { sfx.error(); setError(e instanceof Error ? e.message : "The court could not do that"); }
     finally { setBusy(false); }
   };
-  const onFunded = useCallback(() => { sfx.coins(); setTimeout(sfx.chest, 380); setNotice("The gold is locked in the treasury. PayPal holds it until the decree."); loadProject().catch(() => {}); }, [loadProject]);
-  const onPaid = useCallback(() => { sfx.coins(); setTimeout(sfx.horn, 450); setNotice("PayPal confirmed the payment. The galleon sails."); loadProject().catch(() => {}); }, [loadProject]);
+  const fly = () => { world.current.heliSince = performance.now(); };
+  const onFunded = useCallback(() => { fly(); sfx.coins(); setTimeout(sfx.chest, 380); setNotice("The gold is locked in the treasury. PayPal holds it until the decree."); loadProject().catch(() => {}); }, [loadProject]);
+  const onPaid = useCallback(() => { fly(); sfx.coins(); setTimeout(sfx.horn, 450); setNotice("PayPal confirmed the payment. The galleon sails."); loadProject().catch(() => {}); }, [loadProject]);
+  const onBounty = useCallback(() => { fly(); sfx.coins(); setTimeout(sfx.quest, 300); setNotice("Bounty paid through PayPal. A gold notice goes up on the board."); loadProject().catch(() => {}); }, [loadProject]);
   const onPayError = useCallback((m: string) => { sfx.error(); setError(m); }, []);
 
   const drive = useCallback(async (runId: string) => {
@@ -190,11 +213,46 @@ export default function Realm({ id }: { id: string }) {
   }, [crewFindings]);
   const quest = p ? questFor(p) : null;
 
+  /* ── town progress: XP from real work, rewards to collect, a level that grows the town ── */
+  const earned = useMemo(() => list ? rewards(list.projects) : [], [list]);
+  const xp = earned.reduce((n, r) => n + r.xp, 0);
+  const lvl = levelFor(xp);
+  useEffect(() => {
+    if (!list) return;
+    let stored: string[] | null = null;
+    try { const raw = localStorage.getItem("savepal-collected"); stored = raw ? JSON.parse(raw) as string[] : null; } catch { /* storage blocked */ }
+    // First visit: everything already earned counts as collected, so the town isn't buried in bubbles.
+    setSeen(new Set(stored ?? earned.map(r => r.key)));
+    if (!stored) try { localStorage.setItem("savepal-collected", JSON.stringify(earned.map(r => r.key))); } catch { /* ignore */ }
+  }, [list]); // eslint-disable-line react-hooks/exhaustive-deps
+  useEffect(() => {
+    if (!list) return;
+    let last = 0;
+    try { last = Number(localStorage.getItem("savepal-level")) || 0; localStorage.setItem("savepal-level", String(lvl.level)); } catch { /* ignore */ }
+    if (last && lvl.level > last) { setLevelUp(lvl.level); world.current.builtSince = performance.now(); sfx.horn(); setTimeout(sfx.quest, 500); }
+  }, [lvl.level, list]);
+  const bubbles = seen ? earned.filter(r => r.projectId === id && !seen.has(r.key)) : [];
+  const collect = (r: Reward, x: number, y: number) => {
+    sfx.coins(); world.current.heliSince = performance.now();
+    const next = new Set(seen ?? []); next.add(r.key); setSeen(next);
+    try { localStorage.setItem("savepal-collected", JSON.stringify([...next])); } catch { /* ignore */ }
+    const popId = Date.now() + Math.random();
+    setPops(ps => [...ps, { id: popId, x, y, xp: r.xp }]);
+    setTimeout(() => setPops(ps => ps.filter(q => q.id !== popId)), 1100);
+  };
+  const orders = useMemo(() => (list?.projects ?? []).map(o => ({ o, place: questFor(o) })).filter((x): x is { o: Project; place: Landmark } => !!x.place), [list]);
+  useEffect(() => {
+    if (!p) return;
+    const go = new URLSearchParams(window.location.search).get("go") as Landmark | null;
+    if (go && go in NAMES) { setCourt(go); const u = new URL(window.location.href); u.searchParams.delete("go"); window.history.replaceState(null, "", u); }
+  }, [!!p]); // eslint-disable-line react-hooks/exhaustive-deps
+
   /* ── animation state lives outside React so walking is smooth ── */
   const world = useRef<SceneState & { cartTarget: number; crewTargets: Array<{ u: number; v: number }> }>({
     houses: [], verdicts: {}, visited: new Set(), active: null, held: false, approved: false, paid: false,
     cartU: 3.6, cartMoving: false, showCrew: false, chestsSince: 0, sealSince: 0, paidSince: 0, cartTarget: 3.6, crewTargets: [],
     inspectors: CREW_HUES.map((tunic, i) => ({ u: 6.9 + i * .45, v: 12.5, moving: false, flip: false, tunic } as Walker)), quest: null, hover: null,
+    refunded: false,
   });
   useEffect(() => {
     if (!p) return;
@@ -205,13 +263,17 @@ export default function Realm({ id }: { id: string }) {
     if (held && !w.held) w.chestsSince = now;
     if (approved && !w.approved) w.sealSince = now;
     if (paid && !w.paid) w.paidSince = now;
+    const paidBounties = p.realm.bounties.filter(b => b.status === "COMPLETED").length, refunded = p.realm.appeals.some(a => a.status === "REFUNDED");
+    if (w.bounties !== undefined && paidBounties > w.bounties) w.bountySince = now;
+    if (refunded && w.refunded === false) w.refundSince = now;
+    Object.assign(w, { bounties: paidBounties, appealOpen: !!p.realm.openAppeal, refunded, built: housesBuilt(lvl.level, QUARTER_COUNT) });
     Object.assign(w, { houses, verdicts, visited, active, held, approved, paid, showCrew: running || visited.size > 0, quest: court ? null : quest, hover });
     w.cartTarget = paid ? 15.5 : held ? 9.5 : 3.5;
     const target = active ? houses.find(h => h.path === active) : null;
     w.crewTargets = w.inspectors.map((_, i) => target
       ? { u: target.u + target.s / 2 + (i - 1) * .32, v: target.v < 12 ? target.v + target.s + .45 + (i % 2) * .12 : target.v - .45 - (i % 2) * .12 }
       : { u: 6.9 + i * .45, v: 12.55 + (i % 2) * .1 });
-  }, [p, houses, verdicts, visited, active, running, quest, hover, court]);
+  }, [p, houses, verdicts, visited, active, running, quest, hover, court, lvl.level]);
 
   const ready = !!p;
   useEffect(() => {
@@ -248,17 +310,20 @@ export default function Realm({ id }: { id: string }) {
   }, [ready]);
 
   /* ── camera ── */
+  /** Zoom is always a whole number of screen pixels per world pixel, so the pixel art stays sharp. */
+  const crisp = (k: number) => { const dpr = window.devicePixelRatio || 1, n = k * dpr; return (n >= 1 ? Math.max(1, Math.round(n)) : .5) / dpr; };
+  const snapPx = (x: number) => { const dpr = window.devicePixelRatio || 1; return Math.round(x * dpr) / dpr; };
   const fitView = useCallback((logOpen: boolean) => {
     const el = stage.current; if (!el) return;
     const vw = el.clientWidth, vh = el.clientHeight, wide = vw > 900;
-    const left = wide ? 24 : 6, right = wide ? (logOpen ? 330 : 24) : 6, top = wide ? 130 : 230, bottom = wide ? 96 : 130;
+    const left = wide ? 24 : 6, right = wide ? (logOpen ? 330 : 24) : 6, top = wide ? 130 : 290, bottom = wide ? 96 : 130;
     const freeW = vw - left - right, freeH = vh - top - bottom;
-    const k = Math.min(4, Math.max(wide ? 1 : .6, Math.floor(Math.min(freeW / (ISLAND.x1 - ISLAND.x0), freeH / (ISLAND.y1 - ISLAND.y0)) * 10) / 10));
+    const k = crisp(Math.min(freeW / (ISLAND.x1 - ISLAND.x0), freeH / (ISLAND.y1 - ISLAND.y0)) * 1.15);
     const cx = (ISLAND.x0 + ISLAND.x1) / 2, cy = (ISLAND.y0 + ISLAND.y1) / 2;
     const fx = left + freeW / 2 - vw / 2, fy = top + freeH / 2 - vh / 2;
-    setCam({ k, x: fx - (cx - NATIVE_W / 2) * k, y: fy - (cy - NATIVE_H / 2) * k });
-  }, []);
-  useEffect(() => { if (typeof window !== "undefined" && window.innerWidth <= 900) setLogOpen(false); }, []);
+    setCam({ k, x: snapPx(fx - (cx - NATIVE_W / 2) * k), y: snapPx(fy - (cy - NATIVE_H / 2) * k) });
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
+  useEffect(() => { if (typeof window !== "undefined" && window.innerWidth <= 900) { setLogOpen(false); setOrdersOpen(false); } }, []);
   useEffect(() => {
     if (!ready) return;
     fitView(logOpen);
@@ -267,9 +332,11 @@ export default function Realm({ id }: { id: string }) {
     return () => window.removeEventListener("resize", onResize);
   }, [ready, logOpen, fitView]);
   const zoomAt = (px: number, py: number, dir: 1 | -1) => setCam(c => {
-    const k = Math.min(5, Math.max(.5, Math.round((c.k + dir * .4) * 10) / 10));
+    const dpr = window.devicePixelRatio || 1, n = Math.round(c.k * dpr * 2) / 2;
+    const steps = [.5, 1, 2, 3, 4, 5, 6], i = steps.findIndex(s => s >= n);
+    const k = steps[Math.min(steps.length - 1, Math.max(0, (i < 0 ? steps.length - 1 : i) + dir))] / dpr;
     const nx = (px - c.x) / c.k, ny = (py - c.y) / c.k;
-    return { k, x: px - nx * k, y: py - ny * k };
+    return { k, x: snapPx(px - nx * k), y: snapPx(py - ny * k) };
   });
   const onWheel = (e: React.WheelEvent) => { const r = stage.current!.getBoundingClientRect(); zoomAt(e.clientX - r.left - r.width / 2, e.clientY - r.top - r.height / 2, e.deltaY < 0 ? 1 : -1); };
   const toNative = (cx: number, cy: number) => { const r = canvas.current!.getBoundingClientRect(); return { x: (cx - r.left) / r.width * NATIVE_W, y: (cy - r.top) / r.height * NATIVE_H }; };
@@ -278,7 +345,7 @@ export default function Realm({ id }: { id: string }) {
     const d = drag.current;
     if (!d) { if (canvas.current && e.pointerType === "mouse") { const n = toNative(e.clientX, e.clientY); const l = landmarkAt(n.x, n.y); if (l !== hover) setHover(l); } return; }
     if (Math.abs(e.clientX - d.x) + Math.abs(e.clientY - d.y) > 5) d.moved = true;
-    if (d.moved) setCam(c => ({ ...c, x: d.cx + e.clientX - d.x, y: d.cy + e.clientY - d.y }));
+    if (d.moved) setCam(c => ({ ...c, x: snapPx(d.cx + e.clientX - d.x), y: snapPx(d.cy + e.clientY - d.y) }));
   };
   const onUp = (e: React.PointerEvent) => {
     const d = drag.current; drag.current = null;
@@ -300,7 +367,7 @@ export default function Realm({ id }: { id: string }) {
   const canDispatch = p.role === "client" && !!p.evidence_url && ["SUBMITTED", "REVIEW", "APPROVED", "REVISION_REQUESTED"].includes(p.status);
   const k = cam.k || 1;
   const toScreen = (x: number, y: number) => ({ left: x * k, top: y * k });
-  const chip = (l: Landmark, label: string) => { const b = landmarkBounds(l); return <button key={l} className={`realm-chip land ${quest === l ? "quest" : ""} ${l === "treasury" ? "gold" : ""}`} style={toScreen(b.cx, b.y1 + 4)} onClick={() => enter(l)}>{label}</button>; };
+  const chip = (l: Landmark, label: string, above = false) => { const b = landmarkBounds(l); return <button key={l} className={`realm-chip land ${quest === l ? "quest" : ""} ${l === "treasury" || l === "market" ? "gold" : ""} ${l === "harbour" && p.realm.openAppeal ? "alert" : ""}`} style={toScreen(b.cx, above ? b.top - 10 : b.y1 + 4)} onClick={() => enter(l)}>{label}</button>; };
   const others = list.projects.filter(x => x.id !== id);
 
   return <main className="realm">
@@ -312,16 +379,38 @@ export default function Realm({ id }: { id: string }) {
           {chip("castle", p.role === "client" ? "YOUR CASTLE" : "CLIENT’S CASTLE")}
           {chip("treasury", `TREASURY${days !== null ? ` · ${days}D` : ""}`)}
           {chip("guild", p.role === "freelancer" ? "YOUR GUILD" : "GUILD HALL")}
-          <span aria-hidden="true" className="realm-chip" style={toScreen(project(26.2, 16.2).x, project(26.2, 16.2).y + 8)}>HARBOUR</span>
+          {bubbles.map(r => { const i = bubbles.filter(x => x.place === r.place).indexOf(r), a = bubbleAnchor(r.place); const s = toScreen(a.x + (i % 2 ? 1 : -1) * Math.ceil(i / 2) * 16, a.y - Math.floor(i / 2) * 4); return <button key={r.key} className="realm-bubble" style={s} onClick={e => { e.stopPropagation(); collect(r, s.left, s.top); }} onPointerDown={e => e.stopPropagation()} onPointerUp={e => e.stopPropagation()} title={`${r.label}: collect ${r.xp} XP`}><b>+{r.xp}</b><small>XP</small></button>; })}
+          {pops.map(q => <span key={q.id} className="realm-pop" style={{ left: q.x, top: q.y }} aria-hidden="true">+{q.xp} XP</span>)}
+          {chip("market", `BOUNTIES${p.realm.bountyCents ? ` · ${money(p.realm.bountyCents)}` : ""}`)}
+          {chip("harbour", p.realm.openAppeal ? "CUSTOMS · APPEAL" : "CUSTOMS HOUSE", true)}
         </div>
       </div>
     </div>
 
+    <div className="hud-top" aria-label="Town progress">
+      <div className="top-level" title={`${xp} XP earned from real work`}>
+        <div className="top-star" aria-label={`Town level ${lvl.level}`}><span>{lvl.level}</span></div>
+        <div className="top-xp" role="progressbar" aria-label="Experience" aria-valuemin={0} aria-valuemax={lvl.need} aria-valuenow={lvl.into}>
+          <i style={{ width: `${Math.max(4, Math.round(lvl.into / lvl.need * 100))}%` }} /><span>{lvl.into}/{lvl.need} XP</span>
+        </div>
+      </div>
+      <div className="top-pill coin" title="Paid out through PayPal, all agreements"><b aria-hidden="true" /><span>{money(list.projects.reduce((n, o) => n + (isPaid(o) ? o.amount_cents - (o.realm?.refundedCents ?? 0) : 0), 0) + list.projects.reduce((n, o) => n + (o.realm?.bountyCents ?? 0), 0))}</span></div>
+      <div className="top-pill lock" title="Held by PayPal right now, all agreements"><b aria-hidden="true" /><span>{money(list.projects.reduce((n, o) => n + (["HELD", "PENDING"].includes(o.funding.status) ? o.amount_cents : 0), 0))}</span></div>
+    </div>
     <header className="hud hud-title">
       <div className="hud-bar"><span>THE REALM</span><i /><em className="hud-live">LIVE</em></div>
+
       <button className="hud-kingdom" onClick={() => { sfx.click(); setAtlas(!atlas); }} aria-expanded={atlas}><h1>{p.title}</h1><b>{others.length ? (atlas ? "▴" : "▾") : ""}</b></button>
       {atlas && others.length > 0 && <ul className="hud-atlas">{others.map(o => { const q = questFor(o); return <li key={o.id}><a href={`/app/realm?id=${encodeURIComponent(o.id)}`}><span>{o.title}</span><small>{money(o.amount_cents)}</small>{q && <em>!</em>}</a></li>; })}</ul>}
       <p><b className="c">{p.client_email}</b><span>×</span><b className="f">{p.freelancer_email}</b></p>
+      <Ledger projects={list.projects} />
+      <div className="hud-orders">
+        <button className="hud-orders-head" onClick={() => { sfx.click(); setOrdersOpen(!ordersOpen); }} aria-expanded={ordersOpen}><span>ORDERS</span><b>{orders.length}</b><em>{ordersOpen ? "▴" : "▾"}</em></button>
+        {ordersOpen && (orders.length ? <ol>{orders.slice(0, 5).map(({ o, place }) => <li key={o.id}>
+          <a href={o.id === id ? undefined : `/app/realm?id=${encodeURIComponent(o.id)}&go=${place}`} onClick={o.id === id ? e => { e.preventDefault(); enter(place); } : undefined}>
+            <i className={`ord-${place}`} aria-hidden="true" /><span><b>{questLine(o)}</b><small>{o.title}</small></span><em>+{nextXp(o)}</em>
+          </a></li>)}</ol> : <p className="hud-orders-empty">No orders waiting. Start a new agreement to grow the town.</p>)}
+      </div>
       <a href={`/app?project=${encodeURIComponent(p.id)}`} className="hud-link">◂ WORKSPACE</a>
     </header>
 
@@ -365,15 +454,46 @@ export default function Realm({ id }: { id: string }) {
     </div>}
 
     {court && <Court place={court} p={p} list={list} audit={audit} busy={busy} act={act} dispatch={canDispatch && crewReady && !running ? dispatch : null}
-      onFunded={onFunded} onPaid={onPaid} onPayError={onPayError} close={leave} />}
+      onFunded={onFunded} onPaid={onPaid} onBounty={onBounty} onPayError={onPayError} close={leave} />}
 
+    {levelUp && <div className="hud hud-levelup" role="dialog" aria-label="Level up">
+      <div className="lu-burst" aria-hidden="true">{Array.from({ length: 18 }, (_, i) => <i key={i} style={{ "--a": `${i * 20}deg`, "--d": `${(i % 3) * 80}ms` } as React.CSSProperties} />)}</div>
+      <b className="hud-star big">{levelUp}</b>
+      <h2>LEVEL UP</h2>
+      <p>{UNLOCKS[levelUp] ?? "The town grows: new homes are going up."}</p>
+      <button className="court-btn gold" onClick={() => { sfx.click(); setLevelUp(null); }}>WONDERFUL</button>
+    </div>}
     {(notice || error) && <div className={`hud hud-toast ${error ? "err" : ""}`} role="status"><span>{error || notice}</span><button onClick={() => { setError(""); setNotice(""); }} aria-label="Dismiss">✕</button></div>}
     <p className="realm-hint">DRAG · SCROLL TO ZOOM · CLICK A BUILDING</p>
   </main>;
 }
 
+/** Every agreement you're in, as one kingdom's books: what PayPal holds, has paid, and has returned. */
+function Ledger({ projects }: { projects: Project[] }) {
+  const sum = (f: (p: Project) => number) => projects.reduce((n, p) => n + f(p), 0);
+  const isPaid = (p: Project) => p.funding.status === "CAPTURED" || PAID.includes(p.payment_status);
+  const rows: Array<[string, number, string]> = [
+    ["IN HOLDS", sum(p => ["HELD", "PENDING"].includes(p.funding.status) ? p.amount_cents : 0), "held"],
+    ["PAID OUT", sum(p => isPaid(p) ? p.amount_cents - (p.realm?.refundedCents ?? 0) : 0), "paid"],
+    ["BOUNTIES", sum(p => p.realm?.bountyCents ?? 0), "bounty"],
+    ["REFUNDED", sum(p => p.realm?.refundedCents ?? 0), "refund"],
+  ];
+  return <dl className="hud-ledger" aria-label="Your PayPal books across every agreement">{rows.map(([k, v, c]) => <div key={k} className={c}><dt>{k}</dt><dd>{money(v)}</dd></div>)}</dl>;
+}
+
+/** XP the next step of an agreement is worth, matching what progress.ts awards for it. */
+function nextXp(p: Project): number {
+  if (p.realm?.openAppeal && p.role === "freelancer") return 20;
+  if (p.status === "INVITED") return 30;
+  if (p.role === "client" && p.funding.canFund) return 50;
+  if (p.status === "SUBMITTED" || p.status === "REVIEW") return 60;
+  if (p.status === "APPROVED" && !isPaid(p)) return 100 + Math.min(400, Math.floor(p.amount_cents / 1000));
+  return 40;
+}
+
 function questLine(p: Project): string {
   const amt = money(p.amount_cents);
+  if (p.realm?.openAppeal && p.role === "freelancer") return `Answer the client’s appeal for ${money(p.realm.openAppeal.amount_cents)}`;
   if (p.role === "client") {
     if (p.funding.canFund) return `Lock ${amt} in the treasury`;
     if (p.status === "SUBMITTED") return "The work has arrived. Inspect it";
@@ -385,12 +505,17 @@ function questLine(p: Project): string {
 }
 
 /** The dialog for a landmark: what it means, its state, and the real actions available to the viewer. */
-function Court({ place, p, list, audit, busy, act, dispatch, onFunded, onPaid, onPayError, close }: {
+function Court({ place, p, list, audit, busy, act, dispatch, onFunded, onPaid, onBounty, onPayError, close }: {
   place: Landmark; p: Project; list: ListData; audit: Audit[]; busy: boolean;
   act: (payload: Record<string, unknown>, done: string) => Promise<void>; dispatch: (() => void) | null;
-  onFunded: () => void; onPaid: () => void; onPayError: (m: string) => void; close: () => void;
+  onFunded: () => void; onPaid: () => void; onBounty: () => void; onPayError: (m: string) => void; close: () => void;
 }) {
   const [reason, setReason] = useState(""), [override, setOverride] = useState(false), [url, setUrl] = useState(""), [notes, setNotes] = useState("");
+  const [bounty, setBounty] = useState("25"), [bountyNote, setBountyNote] = useState("");
+  const [claim, setClaim] = useState(() => (p.realm.refundableCents / 100).toFixed(2)), [reply, setReply] = useState("");
+  const bountyRef = useRef({ amount: bounty, note: bountyNote });
+  bountyRef.current = { amount: bounty, note: bountyNote };
+  const bountyExtra = useCallback(() => ({ ...bountyRef.current }), []);
   const client = p.role === "client", amt = money(p.amount_cents);
   const paid = p.funding.status === "CAPTURED" || PAID.includes(p.payment_status);
   const held = p.funding.status === "HELD" || p.funding.status === "PENDING";
@@ -410,6 +535,9 @@ function Court({ place, p, list, audit, busy, act, dispatch, onFunded, onPaid, o
       {client && p.status === "APPROVED" && p.funding.mode !== "HOLD" && !paid && list.paypalReady && list.paypalClientId && !sellerMissing &&
         <div className="court-pp"><PayPalCheckout project={p} clientId={list.paypalClientId} merchantId={merchant} bnCode={list.paypalPartnerBnCode} onPaid={onPaid} onError={onPayError} /></div>}
       {p.funding.canVoid.allowed && <button className="court-btn ghost" disabled={busy} onClick={() => { if (window.confirm(client ? "Recall the gold? PayPal will cancel the hold." : "Decline the quest and release the client’s gold? This can’t be undone.")) act({ action: "void_hold" }, client ? "The hold was recalled." : "You released the client’s gold."); }}>{client ? "RECALL THE GOLD" : "DECLINE THE QUEST"}</button>}
+      {client && p.realm.renew && (p.realm.renew.allowed
+        ? <button className="court-btn ghost" disabled={busy} onClick={() => act({ action: "hold_renew" }, "PayPal renewed the hold. The gold stays locked for another full term.")}>RENEW THE HOLD WITH PAYPAL</button>
+        : <p className="court-note">{p.realm.renew.renewedAt ? `Hold renewed ${short(p.realm.renew.renewedAt)}. PayPal allows one renewal.` : p.realm.renew.from ? `Long job? Renew this hold from ${short(p.realm.renew.from)}.` : p.realm.renew.reason}</p>)}
       {p.funding.status !== "NONE" && p.funding.status !== "ORDER_CREATED" && !paid && <button className="court-btn ghost" disabled={busy} onClick={() => act({ action: "sync_payment" }, "A rider returned from PayPal with the latest word.")}>SEND A RIDER TO PAYPAL</button>}
       {ledger.length > 0 && <ol className="court-ledger" aria-label="PayPal ledger">{ledger.slice(0, 6).map((e, i) => <li key={i}><span>{LEDGER[e.type]}</span><time>{new Date(e.created_at).toLocaleDateString("en-US", { month: "short", day: "numeric" })}</time></li>)}</ol>}
       {(p.paypal_order_id || p.paypal_capture_id) && <p className="court-ids">{p.paypal_order_id && <>ORDER {p.paypal_order_id}</>}{p.paypal_capture_id && <> · CAPTURE {p.paypal_capture_id}</>}</p>}
@@ -429,6 +557,48 @@ function Court({ place, p, list, audit, busy, act, dispatch, onFunded, onPaid, o
       <button className="court-btn ghost" disabled={busy || p.revisions.exhausted || reason.trim().length < 5} onClick={() => act({ action: "revise", reason }, "A revision was ordered.")}>{p.revisions.exhausted ? "NO REVISIONS LEFT" : `ORDER A REVISION${p.revisions.remaining !== null ? ` · ${p.revisions.remaining} LEFT` : ""}`}</button>
     </>;
     else body = <p className="court-note">{paid ? "The decree was sealed and the gold has sailed." : p.status === "APPROVED" ? "The decree is sealed." : p.status === "INVITED" ? "Waiting for the guild to swear to the terms." : "Waiting for the guild’s delivery."}</p>;
+  } else if (place === "market") {
+    const done = p.realm.bounties.filter(b => b.status === "COMPLETED");
+    lore = client ? "Great work deserves more than the agreed price. Pin a bounty here and PayPal pays it to the guild at once." : "Bounties the client paid you on top of the agreement. Each one is a separate PayPal payment.";
+    const valid = /^\d{1,4}(\.\d{1,2})?$/.test(bounty.trim()) && Number(bounty) >= 1 && Number(bounty) <= 5000 && bountyNote.trim().length >= 3;
+    body = <>
+      <div className="court-gold"><strong>{money(p.realm.bountyCents)}</strong><span className={p.realm.bountyCents ? "paid" : ""}>{done.length ? `${done.length} BOUNT${done.length === 1 ? "Y" : "IES"} PAID` : "NO BOUNTIES YET"}</span></div>
+      {client && p.realm.canBounty && list.paypalClientId && <div className="court-bounty">
+        <div className="court-row">
+          <label className="court-money"><span>$</span><input className="court-input" inputMode="decimal" value={bounty} onChange={e => setBounty(e.target.value)} aria-label="Bounty amount in US dollars" /></label>
+          {[10, 25, 50, 100].map(n => <button key={n} type="button" className={`court-pill ${Number(bounty) === n ? "on" : ""}`} onClick={() => setBounty(String(n))}>${n}</button>)}
+        </div>
+        <input className="court-input" value={bountyNote} maxLength={140} onChange={e => setBountyNote(e.target.value)} placeholder="For what? e.g. Shipped two days early" aria-label="What the bounty is for" />
+        {valid ? <div className="court-pp"><PayPalCheckout project={p} clientId={list.paypalClientId} merchantId={list.paymentMode === "SELLER" ? p.seller_merchant_id || undefined : undefined} bnCode={list.paypalPartnerBnCode} mode="bounty" extra={bountyExtra} onPaid={onBounty} onError={onPayError} /></div>
+          : <p className="court-note">Pick an amount from $1 to $5,000 and say what it’s for.</p>}
+      </div>}
+      {client && !p.realm.canBounty && <p className="court-note">{p.status === "INVITED" ? "Bounties open once the guild swears to the terms." : "Bounties need PayPal connected on this site."}</p>}
+      {done.length > 0 && <ol className="court-ledger" aria-label="Bounties">{done.map(b => <li key={b.id}><span><b>{money(b.amount_cents)}</b> {b.note}</span><time>{short(b.created_at)}</time></li>)}</ol>}
+    </>;
+  } else if (place === "harbour") {
+    const open = p.realm.openAppeal;
+    lore = client ? "Something wrong after you paid? File an appeal here. If the guild grants it, PayPal refunds you directly." : "Appeals from the client land here. Granting one sends a real PayPal refund back across the sea.";
+    body = <>
+      <div className="court-gold"><strong>{money(p.realm.refundedCents)}</strong><span className={open ? "alert" : p.realm.refundedCents ? "paid" : ""}>{open ? "APPEAL OPEN" : p.realm.refundedCents ? "REFUNDED" : "NO REFUNDS"}</span></div>
+      {open && <div className="court-appeal">
+        <p><b>{money(open.amount_cents)}</b> requested · {short(open.created_at)}</p>
+        <blockquote>“{open.reason}”</blockquote>
+        {open.status === "REFUNDING" && <p className="court-note">PayPal is processing this refund.</p>}
+      </div>}
+      {open && client && open.status === "OPEN" && <button className="court-btn ghost" disabled={busy} onClick={() => act({ action: "appeal_withdraw", appealId: open.id }, "Appeal withdrawn.")}>WITHDRAW THE APPEAL</button>}
+      {open && !client && <>
+        <textarea className="court-input" rows={2} value={reply} onChange={e => setReply(e.target.value)} placeholder="Your answer to the client" aria-label="Your answer" />
+        <button className="court-btn gold" disabled={busy} onClick={() => { if (window.confirm(`Refund ${money(open.amount_cents)} to the client through PayPal? This can’t be undone.`)) act({ action: "appeal_answer", appealId: open.id, decision: "grant", reply }, `PayPal refunded ${money(open.amount_cents)}. The cutter sails home.`); }}>GRANT · REFUND {money(open.amount_cents)}</button>
+        <button className="court-btn ghost" disabled={busy || reply.trim().length < 10} onClick={() => act({ action: "appeal_answer", appealId: open.id, decision: "decline", reply }, "You answered the appeal.")}>DECLINE WITH THIS ANSWER</button>
+      </>}
+      {!open && client && p.realm.canAppeal && <form className="court-form" onSubmit={e => { e.preventDefault(); act({ action: "appeal_file", amount: claim, reason }, "Appeal filed. The guild will answer it here."); }}>
+        <label className="court-money"><span>$</span><input className="court-input" inputMode="decimal" value={claim} onChange={e => setClaim(e.target.value)} aria-label="Refund amount" /></label>
+        <textarea className="court-input" rows={2} required minLength={10} value={reason} onChange={e => setReason(e.target.value)} placeholder="What went wrong after payment?" aria-label="Reason" />
+        <button className="court-btn gold" disabled={busy || reason.trim().length < 10}>FILE AN APPEAL · UP TO {money(p.realm.refundableCents)}</button>
+      </form>}
+      {!open && !p.realm.canAppeal && <p className="court-note">{paid ? (p.realm.refundableCents ? "Only the client can file an appeal." : "Everything paid has been refunded.") : "Appeals open once PayPal has paid the guild."}</p>}
+      {p.realm.appeals.some(a => a.id !== open?.id) && <ol className="court-ledger" aria-label="Past appeals">{p.realm.appeals.filter(a => a.id !== open?.id).map(a => <li key={a.id}><span><b>{money(a.amount_cents)}</b> {a.status === "REFUNDED" ? "refunded" : a.status.toLowerCase()}{a.reply ? ` · “${a.reply}”` : ""}</span><time>{short(a.resolved_at ?? a.created_at)}</time></li>)}</ol>}
+    </>;
   } else {
     lore = client ? "The freelancer’s guild hall, where the work is made." : "Your guild hall. Swear to the terms, then deliver your work here.";
     if (!client && p.status === "INVITED") body = <>

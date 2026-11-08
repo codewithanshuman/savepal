@@ -10,9 +10,11 @@
 
 export const HW = 16, HH = 8;
 /** The kingdom is a grid of 6-tile city blocks: land runs from G0 to GRID, roads every BLOCK tiles. */
-export const GRID = 24, G0 = -12, BLOCK = 6;
-export const NATIVE_W = 1360, NATIVE_H = 720;
-export const OX = NATIVE_W / 2, OY = 240;
+export const GRID = 24, G0 = -24, BLOCK = 6;
+/** Inside ROAD0 the land is laid out in blocks; beyond it is the royal forest that rings the island. */
+export const ROAD0 = -18;
+export const NATIVE_W = 1640, NATIVE_H = 940;
+export const OX = NATIVE_W / 2, OY = 450;
 
 export type P = { x: number; y: number };
 let offU = 0, offV = 0;

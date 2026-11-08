@@ -215,7 +215,12 @@ export class PayPalSandbox {
       },
       ...(method === "POST" ? { body: JSON.stringify(body ?? {}) } : {}),
     });
-    if (!response.ok) throw new Error(`PayPal ${method} ${path.split("/").slice(0,4).join("/")} failed with HTTP ${response.status}`);
+    if (!response.ok) {
+      // PayPal names the problem (e.g. INSTRUMENT_DECLINED); keep only that safe identifier.
+      const issue = await response.json().then((raw: unknown) => { const b = raw as { name?: string; details?: Array<{ issue?: string }> } | null; return b?.details?.[0]?.issue || b?.name || ""; }, () => "");
+      const tag = /^[A-Z_]{3,60}$/.test(issue) ? ` (${issue})` : "";
+      throw new Error(`PayPal ${method} ${path.split("/").slice(0,4).join("/")} failed with HTTP ${response.status}${tag}`);
+    }
     // Void returns 204 No Content.
     if (response.status === 204) return {} as T;
     return await response.json() as T;
@@ -266,6 +271,20 @@ export class PayPalSandbox {
   voidAuthorization(authorizationId: string, requestId: string, merchantId?: string): Promise<Record<string, never>> {
     if (!safeProviderId(authorizationId)) throw new Error("Invalid PayPal authorization ID");
     return this.request(`/v2/payments/authorizations/${encodeURIComponent(authorizationId)}/void`,"POST",{},requestId,merchantId);
+  }
+
+  /** Renews a hold after PayPal's honor period: a fresh authorization for the same amount. */
+  reauthorize(authorizationId: string, cents: number, currency: string, requestId: string, merchantId?: string): Promise<PayPalAuthorization> {
+    if (!safeProviderId(authorizationId)) throw new Error("Invalid PayPal authorization ID");
+    return this.request(`/v2/payments/authorizations/${encodeURIComponent(authorizationId)}/reauthorize`,"POST",
+      { amount: { currency_code: currency, value: (cents/100).toFixed(2) } },requestId,merchantId);
+  }
+
+  /** Returns money from a completed capture to the payer (a granted appeal). */
+  refundCapture(captureId: string, cents: number, currency: string, requestId: string, note: string, merchantId?: string): Promise<{ id?: string; status?: string }> {
+    if (!safeProviderId(captureId)) throw new Error("Invalid PayPal capture ID");
+    return this.request(`/v2/payments/captures/${encodeURIComponent(captureId)}/refund`,"POST",
+      { amount: { currency_code: currency, value: (cents/100).toFixed(2) }, note_to_payer: note.slice(0,255) },requestId,merchantId);
   }
 
   getCapture(captureId: string, merchantId?: string): Promise<PayPalCapture> {

@@ -12,7 +12,8 @@ import { captureWebsite, evaluateSnapshot, sha256, snapshotManifest, validateSna
 import { reviewWithAi } from "../../../lib/ai-verification";
 import { approveWithReceipt, requireApprovalReceipt, type StoredApprovalProject } from "../../../lib/approval-store";
 import { orderCustomId } from "../../../lib/approval-receipt";
-import { PayPalSandbox, authorizationMatches, holdStatus, orderAuthorization, orderCapture, orderMatches, retrySafe, safeMerchantId, safeProviderId, type ExpectedPayment, type PaymentIntent } from "../../../lib/paypal-assurance";
+import { BOUNTY_MAX_CENTS, BOUNTY_MIN_CENTS, appealable, bountyAllowed, parseBountyCents, refundableCents, renewWindow } from "../../../lib/realm-powers";
+import { PayPalSandbox, authorizationMatches, captureStatus, holdStatus, orderAuthorization, orderCapture, orderMatches, retrySafe, safeMerchantId, safeProviderId, type ExpectedPayment, type PaymentIntent } from "../../../lib/paypal-assurance";
 import { recordCaptureObservation } from "../../../lib/payment-store";
 import { createVerificationInput, type CapturedLivePage } from "../../../lib/verification-proof";
 import { beginSellerOnboarding, requireReadySeller } from "../../../lib/seller-onboarding";
@@ -42,7 +43,7 @@ type Project = StoredApprovalProject & {
   terms_hash: string | null; accepted_terms_hash: string | null; accepted_at: string | null;
   funding_mode: string; funding_status: string; funding_custom_id: string | null;
   paypal_authorization_id: string | null; funding_authorize_request_id: string | null;
-  funding_held_at: string | null; funding_expires_at: string | null;
+  funding_held_at: string | null; funding_expires_at: string | null; funding_renewed_at: string | null;
   created_at: string; updated_at: string;
 };
 type EvidenceSubmission = { id: string; project_id: string; submission_hash: string; snapshot_hash: string; snapshot_key: string; manifest_json: string; created_at: string };
@@ -72,6 +73,15 @@ async function view(p: Project, user: { userId: string; email: string }) {
   const criteria = JSON.parse(p.criteria_json) as Criterion[];
   const findings = p.findings_json ? JSON.parse(p.findings_json) as AdvancedFinding[] : null;
   const consent = await consentState(p);
+  const who = role(p, user);
+  const [bounties, appeals] = await Promise.all([
+    db().prepare("SELECT id,amount_cents,note,status,paypal_capture_id,created_by,created_at FROM bounties WHERE project_id=? AND status<>'ORDER_CREATED' ORDER BY created_at DESC LIMIT 20").bind(p.id)
+      .all<{ id: string; amount_cents: number; note: string; status: string; paypal_capture_id: string | null; created_by: string; created_at: string }>(),
+    db().prepare("SELECT id,amount_cents,reason,status,reply,paypal_refund_id,created_at,resolved_at FROM appeals WHERE project_id=? ORDER BY created_at DESC LIMIT 20").bind(p.id)
+      .all<{ id: string; amount_cents: number; reason: string; status: string; reply: string | null; paypal_refund_id: string | null; created_at: string; resolved_at: string | null }>(),
+  ]);
+  const refundable = refundableCents(p.amount_cents,appeals.results);
+  const openAppeal = appeals.results.find(a => a.status === "OPEN" || a.status === "REFUNDING") ?? null;
   let gate = null;
   try { gate = findings ? decisionGate(criteria,findings) : null; } catch { gate = null; }
   return {
@@ -92,6 +102,15 @@ async function view(p: Project, user: { userId: string; email: string }) {
       canVoid: (() => { const r = role(p, user); return r ? voidAllowed(p, r) : { allowed: false }; })(),
     },
     paymentAwaitingReconciliation: !!p.payment_request_id || !!p.paypal_order_id,
+    realm: {
+      bounties: bounties.results,
+      bountyCents: bounties.results.filter(b => b.status === "COMPLETED").reduce((sum, b) => sum + b.amount_cents, 0),
+      canBounty: who === "client" && bountyAllowed(p) && paypalReady(),
+      appeals: appeals.results, openAppeal,
+      refundedCents: p.amount_cents - refundable, refundableCents: refundable,
+      canAppeal: who === "client" && appealable(p) && !openAppeal && refundable > 0,
+      renew: isHold(p) && p.funding_status === "HELD" ? { ...renewWindow(p.funding_held_at,p.funding_expires_at,!!p.funding_renewed_at), renewedAt: p.funding_renewed_at } : null,
+    },
   };
 }
 
@@ -480,7 +499,7 @@ export async function POST(request: Request) {
       // An unapproved order the current PayPal app can't see (the app or merchant was switched) is
       // dropped, and the recipient rebinds to the configured merchant. Nothing was held, so no money moves.
       if (p.funding_status === "ORDER_CREATED" && p.paypal_order_id && !p.paypal_authorization_id && !p.paypal_capture_id && !cfg.PAYPAL_PARTNER_MERCHANT_ID) {
-        const stale = await client.getOrder(p.paypal_order_id).then(() => false, (e: unknown) => e instanceof Error && /HTTP 404$/.test(e.message));
+        const stale = await client.getOrder(p.paypal_order_id).then(() => false, (e: unknown) => e instanceof Error && /HTTP 404\b/.test(e.message));
         if (stale) {
           const reset = await db().prepare("UPDATE projects SET paypal_order_id=NULL,payment_recipient_merchant_id=NULL,updated_at=? WHERE id=? AND paypal_order_id=? AND funding_status='ORDER_CREATED' AND paypal_authorization_id IS NULL AND paypal_capture_id IS NULL")
             .bind(now(),id,p.paypal_order_id).run();
@@ -628,6 +647,128 @@ export async function POST(request: Request) {
         return fail(`PayPal reconciliation requires review: ${result.outcome}`,409);
       return json(result);
     } catch (error) { return fail(error instanceof Error ? error.message : "Payment reconciliation failed", 502); }
+  }
+  // ── Realm powers: renew a hold, pay a bounty, appeal for a refund. All real PayPal calls. ──
+  if (action === "hold_renew") {
+    if (userRole !== "client") return fail("Only the client can renew the hold", 403);
+    if (!isHold(p) || p.funding_status !== "HELD" || !p.paypal_authorization_id || !p.paypal_order_id) return fail("There is no active PayPal hold to renew", 409);
+    const win = renewWindow(p.funding_held_at,p.funding_expires_at,!!p.funding_renewed_at);
+    if (!win.allowed) return fail(win.reason || "This hold can’t be renewed now", 409);
+    try {
+      const client = paypal();
+      const expected = paymentExpectation(p,p.funding_custom_id || "","AUTHORIZE");
+      const renewed = await client.reauthorize(p.paypal_authorization_id,p.amount_cents,p.currency,`${p.paypal_authorization_id}-renew`,expected.merchantId);
+      if (!safeProviderId(renewed.id)) throw new Error("PayPal did not return the renewed hold");
+      const confirmed = await client.getAuthorization(renewed.id,expected.merchantId);
+      if (!authorizationMatches(confirmed,expected,renewed.id) || holdStatus(confirmed) !== "HELD") throw new Error("PayPal’s renewed hold does not match the agreement");
+      const expires = confirmed.expiration_time && !Number.isNaN(Date.parse(confirmed.expiration_time)) ? new Date(confirmed.expiration_time).toISOString() : null;
+      const stored = await db().prepare("UPDATE projects SET paypal_authorization_id=?,funding_expires_at=?,funding_renewed_at=?,updated_at=? WHERE id=? AND paypal_authorization_id=? AND funding_status='HELD' AND funding_renewed_at IS NULL")
+        .bind(renewed.id,expires,now(),now(),id,p.paypal_authorization_id).run();
+      if (!stored.meta.changes) return fail("Funding state changed; refresh and try again", 409);
+      await event(id,user.email,"FUNDS_RENEWED",`PayPal hold renewed: authorization ${renewed.id} replaces ${p.paypal_authorization_id}${expires ? `; valid until ${expires}` : ""}.`);
+      return json({ status: "HELD", expiresAt: expires });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "PayPal could not renew the hold";
+      return fail(/REAUTHORIZ|TOO_EARLY|HONOR/.test(message) ? "PayPal won’t renew this hold yet. Sandbox holds renew only after the honor period." : message, 502);
+    }
+  }
+  if (action === "bounty_order") {
+    if (userRole !== "client") return fail("Only the client can pay a bounty", 403);
+    if (!bountyAllowed(p)) return fail("A bounty can be paid once the freelancer has accepted", 409);
+    const cents = parseBountyCents(input.amount);
+    const note = String(input.note || "").trim().slice(0, 140);
+    if (cents === null) return fail(`Enter a bounty from $${BOUNTY_MIN_CENTS / 100} to $${(BOUNTY_MAX_CENTS / 100).toLocaleString("en-US")}`);
+    if (note.length < 3) return fail("Add a short note: what the bounty is for");
+    try {
+      const bountyId = crypto.randomUUID(), time = now();
+      const expected = { ...paymentExpectation(p,`bounty:${bountyId}`,"CAPTURE"), amountCents: cents, orderId: undefined, captureId: undefined };
+      await db().prepare("INSERT INTO bounties (id,project_id,amount_cents,currency,note,created_by,status,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?)")
+        .bind(bountyId,id,cents,p.currency,note,user.email,"ORDER_CREATED",time,time).run();
+      const created = await paypal().createOrder(expected,`bounty-${bountyId}`);
+      if (!safeProviderId(created.id)) throw new Error("PayPal returned an invalid order ID");
+      await db().prepare("UPDATE bounties SET paypal_order_id=?,updated_at=? WHERE id=?").bind(created.id,now(),bountyId).run();
+      return json({ orderId: created.id });
+    } catch (error) { return fail(error instanceof Error ? error.message : "PayPal request failed", 502); }
+  }
+  if (action === "bounty_capture") {
+    if (userRole !== "client") return fail("Only the client can pay a bounty", 403);
+    const orderId = String(input.orderId || "");
+    const bounty = safeProviderId(orderId) ? await db().prepare("SELECT * FROM bounties WHERE project_id=? AND paypal_order_id=?").bind(id,orderId)
+      .first<{ id: string; amount_cents: number; currency: string; note: string; status: string; paypal_capture_id: string | null }>() : null;
+    if (!bounty) return fail("This PayPal approval doesn’t match a bounty", 409);
+    if (bounty.status === "COMPLETED") return json({ status: "COMPLETED", captureId: bounty.paypal_capture_id });
+    try {
+      const client = paypal();
+      const expected = { ...paymentExpectation(p,`bounty:${bounty.id}`,"CAPTURE"), amountCents: bounty.amount_cents, orderId, captureId: undefined };
+      await client.captureOrder(orderId,`bounty-${bounty.id}-capture`,expected.merchantId);
+      const order = await client.getOrder(orderId,expected.merchantId);
+      const capture = orderCapture(order,expected);
+      if (!capture?.id) throw new Error("PayPal capture could not be confirmed");
+      const status = captureStatus(capture);
+      await db().prepare("UPDATE bounties SET paypal_capture_id=?,status=?,updated_at=? WHERE id=?").bind(capture.id,status,now(),bounty.id).run();
+      if (status === "COMPLETED") await event(id,user.email,"BOUNTY_PAID",`Bounty of ${(bounty.amount_cents/100).toFixed(2)} ${bounty.currency} paid through PayPal (capture ${capture.id}): “${bounty.note}”.`);
+      return json({ status, captureId: capture.id });
+    } catch (error) {
+      await db().prepare("UPDATE bounties SET status='FAILED',updated_at=? WHERE id=? AND status='ORDER_CREATED'").bind(now(),bounty.id).run().catch(() => {});
+      return fail(error instanceof Error ? error.message : "PayPal bounty failed", 502);
+    }
+  }
+  if (action === "appeal_file") {
+    if (userRole !== "client") return fail("Only the client can file an appeal", 403);
+    if (!appealable(p)) return fail("An appeal can be filed after PayPal has paid the freelancer", 409);
+    const appeals = await db().prepare("SELECT status,amount_cents FROM appeals WHERE project_id=?").bind(id).all<{ status: string; amount_cents: number }>();
+    if (appeals.results.some(a => a.status === "OPEN")) return fail("An appeal is already open", 409);
+    const refundable = refundableCents(p.amount_cents,appeals.results);
+    const cents = parseUsdCents(input.amount);
+    const reason = String(input.reason || "").trim().slice(0, 600);
+    if (cents === null || cents < 1 || cents > refundable) return fail(`Ask for up to ${(refundable/100).toFixed(2)} ${p.currency}`);
+    if (reason.length < 10) return fail("Explain what went wrong in a sentence or two");
+    const appealId = crypto.randomUUID();
+    await db().prepare("INSERT INTO appeals (id,project_id,amount_cents,reason,filed_by,status,created_at) VALUES (?,?,?,?,?,?,?)")
+      .bind(appealId,id,cents,reason,user.email,"OPEN",now()).run();
+    await event(id,user.email,"APPEAL_FILED",`Client appealed for a refund of ${(cents/100).toFixed(2)} ${p.currency}: “${reason}”.`);
+    return json({ id: appealId });
+  }
+  if (action === "appeal_withdraw" || action === "appeal_answer") {
+    const appeal = await db().prepare("SELECT * FROM appeals WHERE id=? AND project_id=?").bind(String(input.appealId || ""),id)
+      .first<{ id: string; amount_cents: number; reason: string; status: string }>();
+    // REFUNDING is a grant that was interrupted; retrying it reuses the same PayPal request ID.
+    if (!appeal || !(appeal.status === "OPEN" || (appeal.status === "REFUNDING" && action === "appeal_answer" && input.decision === "grant"))) return fail("This appeal is no longer open", 409);
+    const reply = String(input.reply || "").trim().slice(0, 600);
+    if (action === "appeal_withdraw") {
+      if (userRole !== "client") return fail("Only the client can withdraw the appeal", 403);
+      await db().prepare("UPDATE appeals SET status='WITHDRAWN',resolved_at=? WHERE id=? AND status='OPEN'").bind(now(),appeal.id).run();
+      await event(id,user.email,"APPEAL_WITHDRAWN","Client withdrew the appeal.");
+      return json({ status: "WITHDRAWN" });
+    }
+    if (userRole !== "freelancer") return fail("Only the freelancer can answer the appeal", 403);
+    if (input.decision === "decline") {
+      if (reply.length < 10) return fail("Explain your answer in a sentence or two");
+      await db().prepare("UPDATE appeals SET status='DECLINED',reply=?,resolved_at=? WHERE id=? AND status='OPEN'").bind(reply,now(),appeal.id).run();
+      await event(id,user.email,"APPEAL_DECLINED",`Freelancer declined the appeal: “${reply}”.`);
+      return json({ status: "DECLINED" });
+    }
+    if (input.decision !== "grant") return fail("Choose to grant or decline the appeal");
+    if (!appealable(p) || !p.paypal_capture_id) return fail("This payment can no longer be refunded", 409);
+    const claimed = await db().prepare("UPDATE appeals SET status='REFUNDING',reply=COALESCE(?,reply) WHERE id=? AND status IN ('OPEN','REFUNDING')").bind(reply || null,appeal.id).run();
+    if (!claimed.meta.changes) return fail("This appeal is no longer open", 409);
+    try {
+      const client = paypal();
+      const expected = paymentExpectation(p,"","CAPTURE");
+      const refund = await client.refundCapture(p.paypal_capture_id,appeal.amount_cents,p.currency,`appeal-${appeal.id}`,`Refund granted on your SavePal appeal for “${p.title}”.`,expected.merchantId);
+      if (!safeProviderId(refund.id)) throw new Error("PayPal did not confirm the refund");
+      const capture = await client.getCapture(p.paypal_capture_id,expected.merchantId);
+      const paymentStatus = captureStatus(capture);
+      await db().batch([
+        db().prepare("UPDATE appeals SET status='REFUNDED',paypal_refund_id=?,refund_status=?,resolved_at=? WHERE id=?").bind(refund.id,refund.status || "COMPLETED",now(),appeal.id),
+        db().prepare("UPDATE projects SET payment_status=?,updated_at=? WHERE id=? AND paypal_capture_id=?").bind(paymentStatus,now(),id,p.paypal_capture_id),
+      ]);
+      await event(id,user.email,"REFUND_ISSUED",`Freelancer granted the appeal: PayPal refund ${refund.id} returned ${(appeal.amount_cents/100).toFixed(2)} ${p.currency} to the client. Payment is now ${paymentStatus.toLowerCase().replace("_"," ")}.`);
+      return json({ status: "REFUNDED", refundId: refund.id });
+    } catch (error) {
+      await db().prepare("UPDATE appeals SET status='OPEN' WHERE id=? AND status='REFUNDING'").bind(appeal.id).run().catch(() => {});
+      return fail(error instanceof Error ? error.message : "PayPal refund failed", 502);
+    }
   }
   // ── Inspector crew: an advisory AI read-through of the delivered site, streamed step by step ──
   if (action === "crew_start") {

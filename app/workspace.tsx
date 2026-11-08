@@ -11,6 +11,23 @@ import "./dashboard.css";
 import PayPalCheckout from "./paypal-checkout";
 
 /* ───────────────────────── types ───────────────────────── */
+/** The Realm's PayPal powers for this agreement, each tile opening the building where it lives. */
+function RealmPowers({ project: p }: { project: Project }) {
+  const r = p.realm; if (!r) return null;
+  const client = p.role === "client", href = `/app/realm?id=${encodeURIComponent(p.id)}`;
+  const paidBounties = r.bounties.filter(b => b.status === "COMPLETED").length;
+  const tiles: Array<{ icon: React.ReactNode; label: string; value: string; hot?: boolean; show: boolean }> = [
+    { icon: <Coins size={16} />, label: "Bounties", value: paidBounties ? `${money(r.bountyCents)} · ${paidBounties} paid` : client && r.canBounty ? "Tip great work" : "None yet", show: paidBounties > 0 || r.canBounty },
+    { icon: <Undo2 size={16} />, label: "Appeals", value: r.openAppeal ? `${money(r.openAppeal.amount_cents)} open` : r.refundedCents ? `${money(r.refundedCents)} refunded` : client && r.canAppeal ? "Ask for a refund" : "None", hot: !!r.openAppeal && !client, show: !!r.openAppeal || r.refundedCents > 0 || r.canAppeal },
+    { icon: <Hourglass size={16} />, label: "Hold", value: r.renew?.renewedAt ? "Renewed" : r.renew?.allowed ? "Renew available" : "Renewable after 3 days", show: !!r.renew && client },
+  ];
+  const shown = tiles.filter(t => t.show);
+  if (!shown.length) return null;
+  return <nav className="d-powers" aria-label="Realm powers">
+    {shown.map(t => <a key={t.label} href={href} className={t.hot ? "hot" : ""}><i>{t.icon}</i><span><small>{t.label}</small>{t.value}</span><ArrowUpRight size={14} /></a>)}
+  </nav>;
+}
+
 type Kind = "reachable" | "contains" | "absent" | "title" | "link" | "path" | "no_broken_pages" | "manual";
 type Criterion = { label: string; kind: Kind; needle?: string; required?: boolean };
 type Status = "VERIFIED" | "FAILED" | "INCONCLUSIVE";
@@ -31,6 +48,7 @@ type Project = {
   gate: Gate | null; consent: Consent; accepted_at: string | null;
   revisions: { max: number | null; used: number; remaining: number | null; exhausted: boolean };
   funding: { mode: "CAPTURE" | "HOLD"; status: string; heldAt: string | null; expiresAt: string | null; canFund: boolean; canRelease: boolean; canVoid: { allowed: boolean; reason?: string } };
+  realm?: { bountyCents: number; bounties: Array<{ status: string }>; canBounty: boolean; openAppeal: { amount_cents: number } | null; refundedCents: number; canAppeal: boolean; renew: { allowed: boolean; renewedAt: string | null } | null };
 };
 type Event = { actor: string; type: string; detail: string; created_at: string };
 type User = { name: string; email: string; avatar: string | null };
@@ -553,6 +571,7 @@ function Detail({ project, data, audit, history, busy, run, onFunded, onPaid, on
       </div>
     </section>
     <div className="d-card d-journey-card"><JourneyBar project={project} /></div>
+    <RealmPowers project={project} />
     <div className="d-tabs" role="tablist"><button role="tab" aria-selected={tab === "work"} className={tab === "work" ? "on" : ""} onClick={() => setTab("work")}>Overview</button><button role="tab" aria-selected={tab === "activity"} className={tab === "activity" ? "on" : ""} onClick={() => setTab("activity")}>Activity <span>{audit.length}</span></button></div>
     {tab === "work" ? <div className="d-cols">
       <div className="d-col-side">
