@@ -1,14 +1,46 @@
 "use client";
 
 import Link from "next/link";
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { Component, Suspense, lazy, useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore, type ReactNode } from "react";
 import {
   ArrowLeft, ArrowRight, ArrowUpRight, Ban, Castle, Check, ChevronRight, CircleDollarSign, Clock3, Coins, CreditCard, ExternalLink, Eye, FileText, Fingerprint,
   Globe, Handshake, Heading1, History, Hourglass, Inbox, Link2Off, ListChecks, Lock, LogOut, Menu, MousePointerClick, PackageCheck,
-  Download, Link2, Plus, RefreshCw, RotateCcw, SearchCheck, Send, ShieldAlert, TrendingDown, TrendingUp, Type, Undo2, Wallet, X,
+  Download, LayoutGrid, Link2, Plus, RefreshCw, RotateCcw, SearchCheck, Send, ShieldAlert, Table2, TrendingDown, TrendingUp, Type, Undo2, Wallet, X,
 } from "lucide-react";
 import "./dashboard.css";
 import PayPalCheckout from "./paypal-checkout";
+import { agreementRows, type RunRecord } from "../lib/grid-adapters";
+import type { Ledger } from "../lib/payment-ledger";
+
+/* ───────────────────────── tables ─────────────────────────
+ * The Evidence and Payments tabs and the agreements table are AG Grid views, loaded only when
+ * opened. Each sits behind GridBoundary: if a table fails to load, the agreement, its payment and
+ * its approval controls are all still there on the Overview. */
+const EvidenceTab = lazy(() => import("./grids/evidence-grid"));
+const PaymentsTab = lazy(() => import("./grids/payment-grid"));
+const AgreementsTable = lazy(() => import("./grids/agreements-grid"));
+class GridBoundary extends Component<{ children: ReactNode; what: string }, { failed: boolean }> {
+  state = { failed: false };
+  static getDerivedStateFromError() { return { failed: true }; }
+  render() {
+    return this.state.failed
+      ? <p className="g-empty" role="alert">The {this.props.what} could not load. Everything else, including payment and approval, is on the Overview.</p>
+      : this.props.children;
+  }
+}
+const GridLoading = () => <div className="g-loading" role="status">Loading the table…</div>;
+type Submission = { id: string; submission_hash: string; snapshot_hash: string | null; created_at: string };
+/** What the agreement page keeps from the detail response, beyond the activity and check history. */
+type DetailData = { run: RunRecord | null; submissions: Submission[]; payments: Ledger | null; currentSubmissionId: string | null };
+const NO_DETAIL: DetailData = { run: null, submissions: [], payments: null, currentSubmissionId: null };
+
+/** Cards or table on the homepage: the viewer's choice, kept in this browser (in memory if storage is unavailable). */
+const VIEW_KEY = "savepal:agreements-view";
+let viewChoice: "cards" | "table" | null = null;
+const viewListeners = new Set<() => void>();
+const readView = (): "cards" | "table" => viewChoice ?? (() => { try { return localStorage.getItem(VIEW_KEY) === "table" ? "table" : "cards"; } catch { return "cards"; } })();
+const writeView = (v: "cards" | "table") => { viewChoice = v; try { localStorage.setItem(VIEW_KEY, v); } catch { /* storage unavailable */ } viewListeners.forEach(fn => fn()); };
+const subscribeView = (fn: () => void) => { viewListeners.add(fn); return () => { viewListeners.delete(fn); }; };
 
 /* ───────────────────────── types ───────────────────────── */
 /** The Realm's PayPal powers for this agreement, each tile opening the building where it lives. */
@@ -506,6 +538,8 @@ function Overview({ data, open, create }: { data: WorkspaceData; open: (id: stri
   const shown = sorted.filter(p => (filter === "all" || (filter === "mine" ? nextMove(p, data).mine : filter === "held" ? isHeld(p) && !isPaid(p) : isPaid(p)))
     && (!query.trim() || `${p.title} ${p.client_email} ${p.freelancer_email}`.toLowerCase().includes(query.trim().toLowerCase())));
   const counts = { all: data.projects.length, mine: t.mine.length, held: data.projects.filter(p => isHeld(p) && !isPaid(p)).length, paid: data.projects.filter(isPaid).length };
+  const layout = useSyncExternalStore(subscribeView, readView, () => "cards" as const);
+  const tableRows = useMemo(() => layout === "table" ? agreementRows(shown, p => nextMove(p as Project, data)) : [], [layout, shown, data]);
   return <div className="d-view">
     <section className="d-hello">
       <Avatar email={data.user.email} name={data.user.name} src={data.user.avatar} size={56} ring />
@@ -522,8 +556,14 @@ function Overview({ data, open, create }: { data: WorkspaceData; open: (id: stri
         <div className="d-filters" role="tablist" aria-label="Filter agreements">{([["all", "All"], ["mine", "Your move"], ["held", "In PayPal"], ["paid", "Paid"]] as const).map(([k, label]) =>
           <button key={k} role="tab" aria-selected={filter === k} className={filter === k ? "on" : ""} onClick={() => setFilter(k)}>{label}<span>{counts[k]}</span></button>)}</div>
         <label className="d-search"><SearchCheck size={15} /><input value={query} onChange={e => setQuery(e.target.value)} placeholder="Search" aria-label="Search agreements" /></label>
+        <div className="g-seg g-seg-ic" role="group" aria-label="Show agreements as">
+          <button className={layout === "cards" ? "on" : ""} aria-pressed={layout === "cards"} onClick={() => writeView("cards")} title="Cards"><LayoutGrid size={15} /><span>Cards</span></button>
+          <button className={layout === "table" ? "on" : ""} aria-pressed={layout === "table"} onClick={() => writeView("table")} title="Table"><Table2 size={15} /><span>Table</span></button>
+        </div>
       </div>
-      {shown.length ? <div className="d-grid">{shown.map(p => <AgreementCard key={p.id} p={p} data={data} onOpen={() => open(p.id)} />)}</div>
+      {shown.length ? layout === "table"
+        ? <GridBoundary what="agreements table"><Suspense fallback={<GridLoading />}><AgreementsTable rows={tableRows} onOpen={open} /></Suspense></GridBoundary>
+        : <div className="d-grid">{shown.map(p => <AgreementCard key={p.id} p={p} data={data} onOpen={() => open(p.id)} />)}</div>
         : <div className="d-empty-sm"><Inbox size={18} /> Nothing here <button className="d-link" onClick={() => { setFilter("all"); setQuery(""); }}>Show all</button></div>}
     </> : <section className="d-empty">
       <div className="d-empty-art" aria-hidden="true"><span><Handshake size={22} /></span><i /><span className="pp"><Lock size={22} /></span><i /><span className="ok"><Coins size={22} /></span></div>
@@ -534,11 +574,18 @@ function Overview({ data, open, create }: { data: WorkspaceData; open: (id: stri
   </div>;
 }
 
-function Detail({ project, data, audit, history, busy, run, onFunded, onPaid, onError, connectSeller, back, notify }: {
-  project: Project; data: WorkspaceData; audit: Event[]; history: RunSummary[]; busy: boolean; run: Run;
+function Detail({ project, data, audit, history, detail, busy, run, onFunded, onPaid, onError, connectSeller, back, notify }: {
+  project: Project; data: WorkspaceData; audit: Event[]; history: RunSummary[]; detail: DetailData; busy: boolean; run: Run;
   onFunded: () => void; onPaid: () => void; onError: (m: string) => void; connectSeller: (id: string) => void; back: () => void; notify: (m: string) => void;
 }) {
-  const [tab, setTab] = useState<"work" | "activity">("work");
+  const [tab, setTab] = useState<"work" | "evidence" | "payments" | "activity">("work");
+  const failing = project.findings?.filter(f => f.status !== "VERIFIED").length ?? 0;
+  const tabs: Array<[typeof tab, string, ReactNode]> = [
+    ["work", "Overview", null],
+    ["evidence", "Evidence", project.findings ? <span className={failing ? "bad" : ""}>{failing ? failing : project.findings.length}</span> : null],
+    ["payments", "Payments", detail.payments?.rows.length ? <span>{detail.payments.rows.length}</span> : null],
+    ["activity", "Activity", <span key="n">{audit.length}</span>],
+  ];
   const client = project.role === "client";
   const me = data.user;
   const copyLink = async () => {
@@ -572,8 +619,13 @@ function Detail({ project, data, audit, history, busy, run, onFunded, onPaid, on
     </section>
     <div className="d-card d-journey-card"><JourneyBar project={project} /></div>
     <RealmPowers project={project} />
-    <div className="d-tabs" role="tablist"><button role="tab" aria-selected={tab === "work"} className={tab === "work" ? "on" : ""} onClick={() => setTab("work")}>Overview</button><button role="tab" aria-selected={tab === "activity"} className={tab === "activity" ? "on" : ""} onClick={() => setTab("activity")}>Activity <span>{audit.length}</span></button></div>
-    {tab === "work" ? <div className="d-cols">
+    <div className="d-tabs" role="tablist" aria-label="Agreement sections">{tabs.map(([k, label, badge]) =>
+      <button key={k} role="tab" aria-selected={tab === k} className={tab === k ? "on" : ""} onClick={() => setTab(k)}>{label}{badge ? <> {badge}</> : null}</button>)}</div>
+    {tab === "evidence" ? <GridBoundary what="evidence table"><Suspense fallback={<GridLoading />}>
+      <EvidenceTab project={project} history={history} run={detail.run} submissions={detail.submissions} currentSubmissionId={detail.currentSubmissionId} onOverview={() => setTab("work")} />
+    </Suspense></GridBoundary>
+    : tab === "payments" ? <GridBoundary what="payments table"><Suspense fallback={<GridLoading />}><PaymentsTab ledger={detail.payments} audit={audit} /></Suspense></GridBoundary>
+    : tab === "work" ? <div className="d-cols">
       <div className="d-col-side">
         <MoveCard key={`${project.id}-${project.status}-${project.funding.status}`} project={project} data={data} busy={busy} run={run} onFunded={onFunded} onPaid={onPaid} onError={onError} connectSeller={connectSeller} />
         <MoneyCard project={project} data={data} audit={audit} busy={busy} run={run} />
@@ -656,6 +708,7 @@ export default function Workspace() {
   const [selected, setSelected] = useState<string | null>(null);
   const [audit, setAudit] = useState<Event[]>([]);
   const [history, setHistory] = useState<RunSummary[]>([]);
+  const [detail, setDetail] = useState<DetailData>(NO_DETAIL);
   const [creating, setCreating] = useState(false);
   const [nav, setNav] = useState(false);
   const [busy, setBusy] = useState(false);
@@ -670,7 +723,11 @@ export default function Workspace() {
     const id = chosen === undefined ? selected : chosen;
     if (id) {
       const detail = await fetch(`/api/workspace?id=${encodeURIComponent(id)}`, { cache: "no-store" });
-      if (detail.ok) { const body = await detail.json() as { audit: Event[]; revisionHistory?: RunSummary[] }; setAudit(body.audit); setHistory(body.revisionHistory || []); }
+      if (detail.ok) {
+        const body = await detail.json() as { audit: Event[]; revisionHistory?: RunSummary[]; verificationRun?: RunRecord | null; evidenceHistory?: Submission[]; payments?: Ledger; currentSubmissionId?: string | null };
+        setAudit(body.audit); setHistory(body.revisionHistory || []);
+        setDetail({ run: body.verificationRun ?? null, submissions: body.evidenceHistory ?? [], payments: body.payments ?? null, currentSubmissionId: body.currentSubmissionId ?? null });
+      }
     }
   }, [selected]);
   useEffect(() => { refresh().catch(e => setError(e.message)); }, [refresh]);
@@ -684,7 +741,7 @@ export default function Workspace() {
   useEffect(() => { if (!notice) return; const t = window.setTimeout(() => setNotice(""), 5000); return () => window.clearTimeout(t); }, [notice]);
 
   const setUrl = (id: string | null) => { const u = new URL(window.location.href); if (id) u.searchParams.set("project", id); else u.searchParams.delete("project"); window.history.replaceState(null, "", u); };
-  const open = (id: string) => { setSelected(id); setCreating(false); setError(""); setNotice(""); setHistory([]); setAudit([]); setNav(false); setUrl(id); refresh(id).catch(e => setError(e.message)); window.scrollTo({ top: 0 }); };
+  const open = (id: string) => { setSelected(id); setCreating(false); setError(""); setNotice(""); setHistory([]); setAudit([]); setDetail(NO_DETAIL); setNav(false); setUrl(id); refresh(id).catch(e => setError(e.message)); window.scrollTo({ top: 0 }); };
   const home = () => { setSelected(null); setCreating(false); setNav(false); setUrl(null); };
   const create = () => { setCreating(true); setSelected(null); setNav(false); setUrl(null); };
   const run: Run = async (payload, success) => {
@@ -741,7 +798,7 @@ export default function Workspace() {
         {notice && <div className="d-toast ok" role="status"><span className="d-live-dot" /><span>{notice}</span><button onClick={() => setNotice("")} aria-label="Dismiss"><X size={15} /></button></div>}
         {!data && !error && <div className="d-skel"><span /><span /><span /></div>}
         {data && creating && <Create data={data} busy={busy} run={run} cancel={home} />}
-        {data && !creating && project && <Detail key={project.id} project={project} data={data} audit={audit} history={history} busy={busy} run={run} onFunded={onFunded} onPaid={onPaid} onError={onError} connectSeller={connectSeller} back={home} notify={setNotice} />}
+        {data && !creating && project && <Detail key={project.id} project={project} data={data} audit={audit} history={history} detail={detail} busy={busy} run={run} onFunded={onFunded} onPaid={onPaid} onError={onError} connectSeller={connectSeller} back={home} notify={setNotice} />}
         {data && !creating && !project && <Overview data={data} open={open} create={create} />}
       </div>
     </main>

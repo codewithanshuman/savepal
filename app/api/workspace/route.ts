@@ -19,6 +19,7 @@ import { createVerificationInput, type CapturedLivePage } from "../../../lib/ver
 import { beginSellerOnboarding, requireReadySeller } from "../../../lib/seller-onboarding";
 import { captureRenderedPage } from "../../../lib/browser-evidence";
 import { reconcileProject } from "../../../lib/payment-reconciliation";
+import { paymentLedger, type LedgerAppeal, type LedgerAttempt, type LedgerBounty, type LedgerObservation, type LedgerProject, type LedgerRefund } from "../../../lib/payment-ledger";
 
 import { evidenceStore } from "../../../lib/evidence-store";
 
@@ -150,7 +151,27 @@ export async function GET(request: Request) {
     const reconciliationAttempts = await db().prepare("SELECT id,source,outcome,detail,attempted_at FROM reconciliation_attempts WHERE project_id=? ORDER BY attempted_at DESC LIMIT 30").bind(id).all();
     const runs = await db().prepare("SELECT id,submission_id,completed_at,findings_json FROM verification_runs WHERE project_id=? AND state='COMPLETED' ORDER BY completed_at ASC LIMIT 50").bind(id).all<{ id: string; submission_id: string | null; completed_at: string | null; findings_json: string | null }>();
     const history = revisionHistory(JSON.parse(p.criteria_json) as Criterion[],runs.results);
-    return json({ project: await view(p, user), revisionHistory: history, audit: audit.results, auditIntegrity, evidenceHistory: submissions.results.map(s => ({ ...s, manifest: JSON.parse(s.manifest_json), manifest_json: undefined })), verificationRun, approvalReceipt, paymentObservations: paymentObservations.results, reconciliationAttempts: reconciliationAttempts.results });
+    // The Payments tab's read model: each PayPal operation once, from SavePal's own records, with
+    // PayPal's reports attached. Read-only; the payment handlers remain the only writers. Each
+    // source is read on its own, so a missing one (an older database without refund operations,
+    // say) leaves that part of the history empty rather than failing the agreement page.
+    let payments: ReturnType<typeof paymentLedger> | null = null;
+    try {
+      const rows = <T,>(q: Promise<D1Result<T>>) => q.then(r => r.results).catch(() => [] as T[]);
+      const bountyRows = await rows(db().prepare("SELECT id,amount_cents,currency,note,status,paypal_order_id,paypal_capture_id,created_at,updated_at FROM bounties WHERE project_id=? ORDER BY created_at ASC").bind(id).all<LedgerBounty>());
+      const refundRows = await rows(db().prepare("SELECT id,capture_id,amount_cents,currency,status,paypal_refund_id,started_at,updated_at FROM refund_operations WHERE project_id=? ORDER BY started_at ASC").bind(id).all<LedgerRefund>());
+      const appealRows = await rows(db().prepare("SELECT id,amount_cents,status,refund_status,paypal_refund_id,created_at,resolved_at FROM appeals WHERE project_id=? ORDER BY created_at ASC").bind(id).all<LedgerAppeal>());
+      const captureObservations = p.paypal_capture_id || p.paypal_order_id
+        ? await rows(db().prepare("SELECT id,source,provider_event_id,order_id,capture_id,provider_status,projected_status,amount_cents,currency,observed_at FROM payment_observations WHERE project_id=? AND (capture_id=? OR order_id=?) ORDER BY observed_at DESC LIMIT 100").bind(id,p.paypal_capture_id ?? "",p.paypal_order_id ?? "").all<LedgerObservation>())
+        : [];
+      payments = paymentLedger({
+        project: p as unknown as LedgerProject, observations: captureObservations, attempts: reconciliationAttempts.results as LedgerAttempt[],
+        bounties: bountyRows, refunds: refundRows, appeals: appealRows,
+        // a capture was asked for and PayPal has not yet given a final answer
+        awaitingReconciliation: !!p.payment_capture_requested_at && !["COMPLETED","PARTIALLY_REFUNDED","REFUNDED","FAILED"].includes(p.payment_status),
+      });
+    } catch { payments = null; }
+    return json({ project: await view(p, user), revisionHistory: history, audit: audit.results, auditIntegrity, evidenceHistory: submissions.results.map(s => ({ ...s, manifest: JSON.parse(s.manifest_json), manifest_json: undefined })), verificationRun, approvalReceipt, paymentObservations: paymentObservations.results, reconciliationAttempts: reconciliationAttempts.results, payments, currentSubmissionId: p.current_submission_id ?? null });
   }
   const rows = await db().prepare("SELECT * FROM projects WHERE client_id = ? OR lower(freelancer_email) = ? ORDER BY created_at DESC")
     .bind(user.userId, user.email.toLowerCase()).all<Project>();
