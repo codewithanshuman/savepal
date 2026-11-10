@@ -11,7 +11,7 @@ import { AgGridReact } from "ag-grid-react";
 import type { ColDef, ValueFormatterParams } from "ag-grid-community";
 import type { Ledger, LedgerRow, MoneyState, Reconciliation } from "../../lib/payment-ledger";
 import { paymentEvents, shortRef } from "../../lib/grid-adapters";
-import { GRID_MODULES, Pill, READ_ONLY, gridTheme, money, useNarrow, when } from "./grid-theme";
+import { GRID_MODULES, Pill, READ_ONLY, gridTheme, money, useNarrow, when, whenShort } from "./grid-theme";
 import { PaymentDetail, RECON, STATE } from "./payment-detail";
 
 type AuditEvent = { actor: string; type: string; detail: string; created_at: string };
@@ -27,13 +27,14 @@ export default function PaymentsTab({ ledger, audit }: { ledger: Ledger | null; 
   const currency = ledger?.currency ?? "USD";
 
   const columns = useMemo<ColDef<LedgerRow>[]>(() => [
-    { headerName: "Operation", field: "operation", flex: 1, minWidth: narrow ? 150 : 170, pinned: narrow ? undefined : "left", tooltip: true },
-    { headerName: "Amount", field: "amountCents", width: 104, type: "rightAligned", filter: "agNumberColumnFilter", valueFormatter: (p: ValueFormatterParams<LedgerRow, number>) => money(p.value ?? 0, p.data?.currency) },
+    // a pinned column does not flex, so on wide screens it gets its own width
+    { headerName: "Operation", field: "operation", ...(narrow ? { flex: 1, minWidth: 150 } : { width: 184, pinned: "left" as const }), tooltip: true },
+    { headerName: "Amount", field: "amountCents", width: 98, type: "rightAligned", filter: "agNumberColumnFilter", valueFormatter: (p: ValueFormatterParams<LedgerRow, number>) => money(p.value ?? 0, p.data?.currency) },
     { headerName: "Money", field: "state", width: 128, cellRenderer: (p: { value: MoneyState }) => <Pill tone={STATE[p.value].tone}>{STATE[p.value].label}</Pill>, getQuickFilterText: (p: { value: MoneyState }) => STATE[p.value].label },
-    { headerName: "PayPal status", field: "providerStatus", width: 118, hide: narrow, valueFormatter: (p: ValueFormatterParams<LedgerRow, string | null>) => p.value ?? "Not reported", cellClassRules: { "g-dim": p => !p.value } },
-    { headerName: "SavePal status", field: "savepalStatus", width: 118, hide: narrow },
-    { headerName: "Reference", field: "reference", width: 122, hide: narrow, valueFormatter: (p: ValueFormatterParams<LedgerRow, string | null>) => shortRef(p.value ?? null), tooltip: p => (p.value as string | null) ?? "No PayPal reference yet" },
-    { headerName: "Recorded", field: "recordedAt", width: 150, hide: narrow, sort: "asc", valueFormatter: (p: ValueFormatterParams<LedgerRow, string | null>) => when(p.value ?? null) },
+    { headerName: "PayPal status", field: "providerStatus", width: 114, hide: narrow, valueFormatter: (p: ValueFormatterParams<LedgerRow, string | null>) => p.value ?? "Not reported", cellClassRules: { "g-dim": p => !p.value } },
+    { headerName: "SavePal status", field: "savepalStatus", width: 114, hide: narrow },
+    { headerName: "Reference", field: "reference", width: 116, hide: narrow, valueFormatter: (p: ValueFormatterParams<LedgerRow, string | null>) => shortRef(p.value ?? null), tooltip: p => (p.value as string | null) ?? "No PayPal reference yet" },
+    { headerName: "Recorded", field: "recordedAt", width: 128, hide: narrow, sort: "asc", valueFormatter: (p: ValueFormatterParams<LedgerRow, string | null>) => whenShort(p.value ?? null), tooltip: p => when((p.value as string | null) ?? null) },
     { headerName: "Reconciliation", field: "reconciliation", width: 168, hide: narrow, cellRenderer: (p: { value: Reconciliation }) => <Pill tone={RECON[p.value].tone} title={RECON[p.value].text}>{RECON[p.value].label}</Pill> },
   ], [narrow]);
 

@@ -50,7 +50,7 @@ export default function EvidenceTab({ project, history, run, submissions, curren
 
   const columns = useMemo<ColDef<EvidenceRow>[]>(() => [
     { headerName: "#", field: "index", width: 58, pinned: narrow ? undefined : "left", valueFormatter: (p: ValueFormatterParams<EvidenceRow, number>) => String((p.value ?? 0) + 1) },
-    { headerName: "Acceptance criterion", field: "criterion", flex: 2, minWidth: narrow ? 160 : 190, pinned: narrow ? undefined : "left", tooltip: true, filter: "agTextColumnFilter" },
+    { headerName: "Acceptance criterion", field: "criterion", ...(narrow ? { flex: 2, minWidth: 160 } : { width: 230, pinned: "left" as const }), tooltip: true, filter: "agTextColumnFilter" },
     {
       headerName: "Result", field: "result", width: 124, comparator: (a: ResultStatus, b: ResultStatus) => ORDER[a] - ORDER[b],
       cellRenderer: (p: { value: ResultStatus }) => <Pill tone={RESULT[p.value].tone}>{RESULT[p.value].label}</Pill>,
@@ -72,7 +72,7 @@ export default function EvidenceTab({ project, history, run, submissions, curren
   ], [narrow, history.length]);
 
   const changeColumns = useMemo<ColDef<ComparisonRow>[]>(() => [
-    { headerName: "Acceptance criterion", field: "criterion", flex: 2, minWidth: 180, pinned: narrow ? undefined : "left", tooltip: true },
+    { headerName: "Acceptance criterion", field: "criterion", ...(narrow ? { flex: 2, minWidth: 160 } : { width: 280, pinned: "left" as const }), tooltip: true },
     { headerName: "Previous", field: "previous", width: 136, cellRenderer: (p: { value: ResultStatus }) => <Pill tone={RESULT[p.value].tone}>{RESULT[p.value].label}</Pill> },
     { headerName: "Latest", field: "latest", width: 136, cellRenderer: (p: { value: ResultStatus }) => <Pill tone={RESULT[p.value].tone}>{RESULT[p.value].label}</Pill> },
     { headerName: "Change", field: "change", width: 136, cellRenderer: (p: { value: ComparisonRow["change"] }) => <Pill tone={CHANGE[p.value].tone}>{CHANGE[p.value].label}</Pill> },

@@ -10,7 +10,7 @@ import { useMemo, useState } from "react";
 import { AgGridReact } from "ag-grid-react";
 import type { ColDef, GridState, RowClassRules, ValueFormatterParams } from "ag-grid-community";
 import type { AgreementRow } from "../../lib/grid-adapters";
-import { GRID_MODULES, Pill, READ_ONLY, gridTheme, money, useNarrow, when, type Tone } from "./grid-theme";
+import { GRID_MODULES, Pill, READ_ONLY, gridTheme, money, useNarrow, when, whenShort, type Tone } from "./grid-theme";
 
 const TONE: Record<AgreementRow["tone"], Tone> = { act: "pp", wait: "mute", done: "ok", warn: "warn" };
 const STATE_KEY = "savepal:grid:agreements:v2";
@@ -25,7 +25,7 @@ export default function AgreementsTable({ rows, onOpen }: { rows: AgreementRow[]
   const columns = useMemo<ColDef<AgreementRow>[]>(() => [
     {
       // the agreement's name opens it, as the card does
-      headerName: "Agreement", field: "title", flex: 1.5, minWidth: narrow ? 150 : 180, pinned: narrow ? undefined : "left", tooltip: true, filter: "agTextColumnFilter",
+      headerName: "Agreement", field: "title", ...(narrow ? { flex: 1.5, minWidth: 150 } : { width: 196, pinned: "left" as const }), tooltip: true, filter: "agTextColumnFilter",
       cellRenderer: (p: { value: string; data?: AgreementRow }) => p.data ? <button className="g-link" onClick={() => onOpen(p.data!.id)} aria-label={`Open ${p.value}`}>{p.value}</button> : null,
     },
     { headerName: "Other party", field: "other", minWidth: 140, flex: 1, hide: narrow, tooltip: true },
@@ -37,7 +37,7 @@ export default function AgreementsTable({ rows, onOpen }: { rows: AgreementRow[]
       headerName: "Next action", field: "next", flex: 1.3, minWidth: 170,
       cellRenderer: (p: { value: string; data?: AgreementRow }) => p.data ? <span className="g-next">{p.data.mine && <span className="d-pulse" aria-label="Your move" />}<Pill tone={TONE[p.data.tone]}>{p.value}</Pill></span> : null,
     },
-    { headerName: "Last activity", field: "updated", width: 146, hide: narrow, sort: "desc", valueFormatter: (p: ValueFormatterParams<AgreementRow, string>) => when(p.value ?? null) },
+    { headerName: "Last activity", field: "updated", width: 132, hide: narrow, sort: "desc", valueFormatter: (p: ValueFormatterParams<AgreementRow, string>) => whenShort(p.value ?? null), tooltip: p => when((p.value as string | null) ?? null) },
   ], [narrow, onOpen]);
   const rowClassRules = useMemo<RowClassRules<AgreementRow>>(() => ({ "g-row-mine": p => !!p.data?.mine }), []);
   return <div className="g-grid g-wide" role="region" aria-label="Agreements">
