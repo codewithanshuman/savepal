@@ -132,7 +132,9 @@ export function bakeTerrainAtlas(scene: Phaser.Scene, baker: Baker): void {
   }
 
   const rows = Math.ceil(index / ATLAS_COLUMNS);
-  baker.flush(TERRAIN_ATLAS_KEY, ATLAS_COLUMNS * TILE_WIDTH * ATLAS_RES, rows * TILE_HEIGHT * ATLAS_RES);
+  // power-of-two sides, so the GPU builds mipmaps and the ground stays clean when zoomed far out
+  const pot = (n: number) => 2 ** Math.ceil(Math.log2(n));
+  baker.flush(TERRAIN_ATLAS_KEY, pot(ATLAS_COLUMNS * TILE_WIDTH * ATLAS_RES), pot(rows * TILE_HEIGHT * ATLAS_RES));
   baker.graphics.setScale(1);
 
   const texture = scene.textures.get(TERRAIN_ATLAS_KEY);

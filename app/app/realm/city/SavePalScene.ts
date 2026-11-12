@@ -17,7 +17,7 @@ import { WOODEN_SHIP_KEYS } from "../reference-city/textures/vehicles";
 import { CITY_SIZE, ESTATES, blockedAt, doorsFor, kingdom, type RealmInput, type Structure } from "./layout";
 import { Island, ISLAND_BOUNDS } from "./island";
 import { bakeCoins, COIN_TEXTURES } from "./coins";
-import { bakeAll, RES, type Asset } from "./textures/atelier";
+import { bakeAll, bakeOne, RES, unit, type Asset } from "./textures/atelier";
 import { PALACE, PALACE_BUILDER, PALACE_FOUNTAIN } from "./textures/palace";
 import type { Atelier } from "./textures/atelier";
 import { TOWN, TOWN_BUILDERS } from "./textures/town";
@@ -29,6 +29,9 @@ import { bakeCarts, trotKey } from "./textures/carts";
 import { KingdomLife, PEOPLE, personKey, personUrl, structureDepth, type Person } from "./life";
 import { Effects, bakeFx } from "./rig";
 import { Townsfolk } from "./folk";
+import { Ocean } from "./ocean";
+import { Storms } from "./weather";
+import { RealmGrade, addGrade } from "./grade";
 import { bakeCritters } from "./textures/critters";
 import { WalkMode, type Entrance } from "./walk";
 
@@ -60,6 +63,13 @@ export class SavePalScene extends WorldScene {
   private folk?: Townsfolk;
   private fx?: Effects;
   private night?: Nightfall;
+  private ocean?: Ocean;
+  private storms?: Storms;
+  private stormPlaces: RealmPlace[] = [];
+  private thunderHandler?: () => void;
+  private grade: RealmGrade | null = null;
+  /** Frame times sampled once the kingdom has settled, to drop the colour pass on a struggling device. */
+  private probe = { from: 0, sum: 0, n: 0, done: false };
   private skyMode: SkyMode = "auto";
   private nightSeen = -1;
   private island?: Island;
@@ -110,9 +120,10 @@ export class SavePalScene extends WorldScene {
     super.create();
     this.cameras.main.setBackgroundColor(SEA);
     bakeCoins(this);
+    // the landmarks every kingdom has; each estate's own art is baked when its building is dressed
     bakeAll(this, { palace: PALACE, treasury: TREASURY }, { palace: PALACE_BUILDER, treasury: TREASURY_BUILDER });
-    bakeAll(this, TOWN, TOWN_BUILDERS);
-    bakeAll(this, FARMS, FARM_BUILDERS);
+    bakeOne(this, TOWN.galley, TOWN_BUILDERS.galley);
+    bakeOne(this, TOWN.bountyStall, TOWN_BUILDERS.bountyStall);
     bakeSky(this);
     bakeCarts(this);
     if (!this.textures.exists("savepal:spark")) {
@@ -125,6 +136,10 @@ export class SavePalScene extends WorldScene {
     this.life = new KingdomLife(this, this.fx);
     this.folk = new Townsfolk(this, this.fx);
     this.night = new Nightfall(this);
+    this.ocean = new Ocean(this);
+    this.storms = new Storms(this);
+    this.storms.onStrike = () => this.thunderHandler?.();
+    this.grade = addGrade(this);
     this.night.setMode(this.skyMode);
     this.island = new Island(this);
     this.walk = new WalkMode(this, {
@@ -139,7 +154,7 @@ export class SavePalScene extends WorldScene {
     this.ready = true;
     this.events.once("shutdown", () => {
       this.ready = false;
-      this.walk?.stop(); this.life?.destroy(); this.folk?.destroy(); this.island?.destroy(); this.fx?.destroy(); this.night?.destroy();
+      this.walk?.stop(); this.life?.destroy(); this.folk?.destroy(); this.island?.destroy(); this.fx?.destroy(); this.night?.destroy(); this.ocean?.destroy(); this.ocean = undefined; this.storms?.destroy(); this.storms = undefined; this.grade = null;
       this.life = undefined; this.folk = undefined; this.island = undefined; this.walk = undefined; this.fx = undefined; this.night = undefined;
       this.bubbles.clear(); this.plates = []; this.effectsBuilt = false;
     });
@@ -164,11 +179,41 @@ export class SavePalScene extends WorldScene {
     this.life?.build(structures);
     this.folk?.build(structures, this.terrainManager.terrain);
     this.lightUp(structures);
+    this.applyStorms();
     const mainFlag: FlagColor = input.current.paid ? "gold" : input.current.held ? "paypal" : "royal";
     this.life?.setState({ held: input.current.held, paid: input.current.paid, working: input.stage === 2, appealOpen: input.appealOpen, bounties: input.bounties, inspecting: input.inspecting, banner: input.banner, mainFlag });
     this.buildEffects();
     this.layoutBubbles();
     this.playIntro();
+  }
+
+  /** The places where the agreement is in trouble: a storm cell stands over each. */
+  setStorms(places: RealmPlace[]): void { this.stormPlaces = places; this.applyStorms(); }
+  onThunder(handler?: () => void): void { this.thunderHandler = handler; }
+  private applyStorms(): void {
+    if (!this.storms || !this.ready || !this.structures.length) return;
+    const role = { castle: "palace", guild: "guild", market: "bazaar", harbour: "port" } as const;
+    this.storms.set(this.stormPlaces.flatMap((place): Array<{ key: string; x: number; y: number }> => {
+      if (place === "treasury") return [{ key: place, ...at(capitol.centerX, (capitol.minY + capitol.maxY) / 2) }];
+      const s = this.structures.find(x => x.role === role[place]);
+      return s ? [{ key: place, ...at(s.x, s.y) }] : [];
+    }));
+  }
+
+  /** What the radar shows: the camera's view of the world, and where the walker stands. */
+  mapState(): { view: { x: number; y: number; w: number; h: number }; walker: { x: number; y: number } | null } | null {
+    if (!this.ready || !this.structures.length) return null;
+    const v = this.cameras.main.worldView;
+    return { view: { x: v.x, y: v.y, w: v.width, h: v.height }, walker: this.walk?.spot ?? null };
+  }
+  /** Flies the camera to a point in the world (a click on the radar). */
+  flyTo(x: number, y: number): void {
+    if (this.walk?.active) return;
+    this.cameraController.moveCameraTo(x, y, Math.max(.75 * this.dpr, this.cameraController.zoomTarget));
+  }
+  /** The kingdom exactly as it is drawn this frame, as an image. */
+  photo(done: (image: HTMLImageElement | null) => void): void {
+    try { this.game.renderer.snapshot(image => done(image instanceof HTMLImageElement ? image : null)); } catch { done(null); }
   }
 
   /** Day, night, or the viewer's own clock. */
@@ -278,9 +323,21 @@ export class SavePalScene extends WorldScene {
     this.life?.update(delta);
     this.folk?.update(delta, time);
     this.animateTraffic(time);
+    this.ocean?.update(time, this.night?.k ?? 0);
+    this.storms?.update(time);
+    if (this.grade && !this.probe.done && this.structures.length) {
+      // judge the frame rate over four seconds, starting eight seconds in; below ~14 fps the grade goes
+      if (!this.probe.from) this.probe.from = time + 8000;
+      else if (time > this.probe.from) { this.probe.sum += delta; this.probe.n++; }
+      if (time > this.probe.from + 4000 && this.probe.n) {
+        this.probe.done = true;
+        if (this.probe.sum / this.probe.n > 70) { this.cameras.main.removePostPipeline(this.grade); this.grade = null; }
+      }
+    }
     if (this.night) {
       this.night.update(time, delta);
       const k = this.night.k;
+      if (this.grade) this.grade.night = k;
       if (this.folk) this.folk.night = k;
       if (Math.abs(k - this.nightSeen) > .02) { this.nightSeen = k; this.island?.setNight(k); }
     }
@@ -308,7 +365,7 @@ export class SavePalScene extends WorldScene {
     for (const sprite of this.terrainManager.propSprites) {
       if (sprite.texture.key === CAPITOL_KEY || sprite.texture.key === TREASURY.key) {
         const p = projection.project(capitol.centerX, (capitol.minY + capitol.maxY) / 2);
-        sprite.setTexture(TREASURY.key).setOrigin(.5, 1).setScale(1 / RES).setPosition(p.x, p.y + TREASURY.anchorY);
+        sprite.setTexture(TREASURY.key).setOrigin(.5, 1).setScale(unit(TREASURY.key)).setData("unit", unit(TREASURY.key)).setPosition(p.x, p.y + TREASURY.anchorY);
         this.treasurySprite = sprite;
       } else sprite.setVisible(false);
     }
@@ -324,9 +381,10 @@ export class SavePalScene extends WorldScene {
       const view = this.buildingManager.getViews().get(s.path);
       const asset = ASSETS[s.kind];
       if (!view || !asset) continue;
-      const p = projection.project(s.x, s.y);
+      const p = projection.project(s.x, s.y), builder = BUILDERS[s.kind];
+      if (builder) bakeOne(this, asset, builder);
       if (view.sprite.texture.key !== asset.key) view.sprite.setTexture(asset.key);
-      view.sprite.setOrigin((asset.originX ?? asset.width / 2) / asset.width, 1).setScale(1 / RES).setPosition(p.x, p.y + asset.anchorY).setDepth(structureDepth(s));
+      view.sprite.setOrigin((asset.originX ?? asset.width / 2) / asset.width, 1).setScale(unit(asset.key)).setData("unit", unit(asset.key)).setPosition(p.x, p.y + asset.anchorY).setDepth(structureDepth(s));
       view.sprite.setData("constructionAnchorOffset", asset.anchorY - 24);
       view.sprite.setInteractive({ pixelPerfect: true, useHandCursor: true });
     }
@@ -335,7 +393,7 @@ export class SavePalScene extends WorldScene {
   /** A Township-style squash and spring when a building is tapped. */
   private bounce(sprite: Phaser.GameObjects.Sprite): void {
     if (this.still || sprite.getData("bouncing")) return;
-    const base = 1 / RES;
+    const base = (sprite.getData("unit") as number | undefined) ?? sprite.scaleX;
     sprite.setData("bouncing", true);
     this.tweens.chain({
       targets: sprite,

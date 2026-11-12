@@ -59,6 +59,8 @@ export const sfx = {
   chest: () => { noise(.12, { freq: 500, vol: .7 }); note(110, .12, { type: "triangle", f1: 70, vol: .6 }); },
   /** The client's wax seal on the decree. */
   seal: () => { noise(.09, { freq: 1400, vol: .5 }); note(196, .18, { type: "triangle", f1: 98, at: .02, vol: .7 }); [523, 659, 784].forEach((f, i) => note(f, .22, { at: .14 + i * .07, vol: .22 })); },
+  /** Thunder after a lightning strike: a crack, then a long low roll. */
+  thunder: () => { noise(.12, { freq: 2200, vol: .5 }); noise(1.1, { at: .08, freq: 180, vol: .8 }); note(62, 1.2, { type: "triangle", f1: 38, at: .1, vol: .5 }); },
   /** The galleon's horn as it sails out with the gold. */
   horn: () => { note(196, .9, { type: "sawtooth", f1: 185, vol: .18 }); note(294, .9, { type: "triangle", f1: 277, vol: .14 }); },
   /** A quest appears, or the inspectors set out. */

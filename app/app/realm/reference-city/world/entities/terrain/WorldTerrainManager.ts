@@ -53,7 +53,8 @@ export class WorldTerrainManager {
     const odds = this.propOdds(terrain);
 
     for (const cell of terrain.cells) {
-      if (cell.kind === "water" && !nearShore(terrain, cell)) {
+      // SavePal: the sea is drawn by the ocean shader (city/ocean.ts); no water tiles are laid over it
+      if (cell.kind === "water") {
         continue;
       }
 

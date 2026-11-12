@@ -75,6 +75,9 @@ export class WalkMode {
   /** Where the walker stands, for entering the nearest door. */
   nearest(): Entrance | null { return this.near; }
 
+  /** Where the walker stands in the world, for the radar. */
+  get spot(): { x: number; y: number } | null { return this.active && this.fig ? { x: this.fig.root.x, y: this.fig.root.y } : null; }
+
   /** The town cheers: so do you. */
   cheer(): void { this.fig?.cheer(); }
 

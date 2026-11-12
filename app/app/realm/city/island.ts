@@ -16,7 +16,7 @@ import Phaser from "phaser";
 import { GROUND_DEPTH, SKY_DEPTH, projection } from "../reference-city/world/core/worldConstants";
 import { setCoast } from "../reference-city/layouts/terrain";
 import { CITY_SIZE } from "./layout";
-import { bakeAll, RES, type Asset } from "./textures/atelier";
+import { bakeAll, unit, type Asset } from "./textures/atelier";
 
 /** A grass ring around the field, then the cliff edge. */
 export const RINGS = 2;
@@ -137,16 +137,16 @@ export class Island {
       const u = gx + (hash(gy, gx) - .5) * .5, v = gy + (hash(gx + 3, gy) - .5) * .5, kind = hash(gx * 2, gy * 3);
       const tree = kind < .45 ? TREES.oak! : kind < .75 ? TREES.pine! : TREES.birch!;
       const p = at(u, v);
-      add(this.scene.add.image(p.x, p.y + tree.anchorY, tree.key).setOrigin(.5, 1).setScale((.8 + hash(gx, gy + 9) * .35) / RES).setDepth(projection.depth(u, v)));
+      add(this.scene.add.image(p.x, p.y + tree.anchorY, tree.key).setOrigin(.5, 1).setScale((.8 + hash(gx, gy + 9) * .35) * unit(tree.key)).setDepth(projection.depth(u, v)));
     }
     // drifting clouds with their shadows
     if (!this.still) {
       const left = at(U0 - 10, V1).x, right = at(U1 + 10, V0).x, top = at(U0, V0).y - 300, bottom = at(U1, V1).y;
       for (let i = 0; i < 6; i++) {
-        const y = top + hash(i, 4) * (bottom - top), x = left + hash(i, 8) * (right - left), sc = (1.1 + hash(i, 2) * .9) / RES;
+        const y = top + hash(i, 4) * (bottom - top), x = left + hash(i, 8) * (right - left), size = 1.1 + hash(i, 2) * .9, sc = size * unit(TREES.cloud!.key);
         const cloud = add(this.scene.add.image(x, y, TREES.cloud!.key).setScale(sc).setAlpha(.92).setDepth(SKY_DEPTH + 2));
         cloud.setData("cloud", true);
-        const shadow = add(this.scene.add.ellipse(x + 40, y + 300, 220 * sc * RES, 50 * sc * RES, 0x14260f, .1).setDepth(SKY_DEPTH - 60));
+        const shadow = add(this.scene.add.ellipse(x + 40, y + 300, 220 * size, 50 * size, 0x14260f, .1).setDepth(SKY_DEPTH - 60));
         const drift = () => this.scene.tweens.add({ targets: [cloud, shadow], x: `+=${right - left}`, duration: 220000 + hash(i, 6) * 120000, onComplete: () => { cloud.x -= right - left + 600; shadow.x = cloud.x + 40; drift(); } });
         drift();
       }

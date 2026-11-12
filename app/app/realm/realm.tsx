@@ -6,6 +6,7 @@ import { setSfxEnabled, sfx, sfxEnabled } from "./sfx";
 import { UNLOCKS, housesBuilt, isPaid, levelFor, rewards } from "./progress";
 import { RealmCanvas, type RealmCanvasHandle } from "./city/RealmCanvas";
 import type { SkyMode } from "./city/night";
+import { Radar, type RadarTarget } from "./radar";
 import { MAX_HOMES, type RealmInput } from "./city/layout";
 import type { RealmPick, RealmPlace } from "./city/SavePalScene";
 import { coinIconUrl, coinPileUrl } from "./city/coins";
@@ -30,6 +31,8 @@ function subscribeSky(fn: () => void): () => void {
 }
 
 type Landmark = RealmPlace;
+/** Where each landmark stands on the radar. */
+const RADAR_TARGET: Record<Landmark, RadarTarget> = { castle: "palace", treasury: "treasury", guild: "guild", market: "bazaar", harbour: "port" };
 type Verdict = "VERIFIED" | "FAILED" | "INCONCLUSIVE";
 
 /* The Realm: one agreement as a city, and a place where the work actually happens. The world is the
@@ -141,6 +144,8 @@ export default function Realm({ id }: { id: string }) {
   const toggleSound = () => { const on = !sound; setSfxEnabled(on); setSound(on); if (on) sfx.click(); };
   // the kingdom keeps the viewer's clock by default; the sky button holds it at day or night instead
   const sky = useSyncExternalStore(subscribeSky, readSky, () => "auto" as SkyMode);
+  const readMap = useCallback(() => realm.current?.map() ?? null, []);
+  const travel = useCallback((x: number, y: number) => { sfx.click(); realm.current?.flyTo(x, y); }, []);
   const cycleSky = () => { sfx.click(); writeSky(sky === "auto" ? "day" : sky === "day" ? "night" : "auto"); };
   /** Opening a building plays its door; closing plays it backwards. */
   const enter = (l: Landmark | null) => { if (l) { sfx.open(); realm.current?.focus(l); } setCourt(l); setPicked(null); };
@@ -292,6 +297,15 @@ export default function Realm({ id }: { id: string }) {
   }, [!!p]); // eslint-disable-line react-hooks/exhaustive-deps
 
   /* ── the city: built from the agreement's real state ── */
+  // a storm gathers over the place where the agreement is in trouble, and clears when it is resolved:
+  // the port while an appeal is open, the guild while work is sent back or a required check has failed
+  const storms = useMemo<Landmark[]>(() => {
+    if (!p) return [];
+    const out: Landmark[] = [];
+    if (p.realm?.openAppeal) out.push("harbour");
+    if (p.status === "REVISION_REQUESTED" || (!!p.gate?.blocking.length && ["SUBMITTED", "REVIEW"].includes(p.status))) out.push("guild");
+    return out;
+  }, [p]);
   const realmInput = useMemo<RealmInput | null>(() => {
     if (!p || !list) return null;
     const toA = (o: Project) => ({ id: o.id, title: o.title, amount_cents: o.amount_cents, held: ["HELD", "PENDING"].includes(o.funding.status), paid: isPaid(o) });
@@ -318,12 +332,36 @@ export default function Realm({ id }: { id: string }) {
   const held = p.funding.status === "HELD" || p.funding.status === "PENDING";
   const paid = p.funding.status === "CAPTURED" || PAID.includes(p.payment_status);
   const treasuryState = paid ? "PAID TO THE GUILD" : held ? "HELD BY PAYPAL" : p.funding.mode === "HOLD" ? "AWAITING GOLD" : "PAID AFTER APPROVAL";
+  const takePhoto = async () => {
+    sfx.click();
+    const shot = await realm.current?.photo();
+    if (!shot) return;
+    const c = document.createElement("canvas"), g = c.getContext("2d");
+    if (!g) return;
+    c.width = shot.width; c.height = shot.height;
+    g.drawImage(shot, 0, 0);
+    const k = Math.max(1, shot.width / 1280), bar = 58 * k;
+    const fade = g.createLinearGradient(0, c.height - bar * 1.8, 0, c.height);
+    fade.addColorStop(0, "rgba(13,20,34,0)"); fade.addColorStop(.5, "rgba(13,20,34,.82)"); fade.addColorStop(1, "rgba(13,20,34,.96)");
+    g.fillStyle = fade; g.fillRect(0, c.height - bar * 1.8, c.width, bar * 1.8);
+    g.textBaseline = "middle";
+    g.font = `${16 * k}px Silkscreen, monospace`; g.fillStyle = "#ffd15c"; g.fillText(p.title.toUpperCase().slice(0, 48), 22 * k, c.height - bar * .62);
+    g.font = `${9 * k}px Silkscreen, monospace`; g.fillStyle = "#e8edf5"; g.fillText(`${money(p.amount_cents)} · ${treasuryState} · SAVEPAL`, 22 * k, c.height - bar * .26);
+    c.toBlob(blob => {
+      if (!blob) return;
+      const a = document.createElement("a");
+      a.href = URL.createObjectURL(blob);
+      a.download = `savepal-realm-${p.title.toLowerCase().replace(/[^a-z0-9]+/g, "-").slice(0, 40) || "kingdom"}.png`;
+      a.click(); setTimeout(() => URL.revokeObjectURL(a.href), 2000);
+      setNotice("Picture saved: your kingdom as it stands now.");
+    }, "image/png");
+  };
   const days = held && p.funding.expiresAt ? Math.max(0, Math.ceil((new Date(p.funding.expiresAt).getTime() - Date.now()) / 86_400_000)) : null;
   const canDispatch = p.role === "client" && !!p.evidence_url && ["SUBMITTED", "REVIEW", "APPROVED", "REVISION_REQUESTED"].includes(p.status);
   const others = list.projects.filter(x => x.id !== id);
 
   return <main className="realm">
-    {realmInput && <RealmCanvas ref={realm} input={realmInput} rewards={bubbleRewards} onPick={pick} onCollect={collect} onNear={setNear} sky={sky} />}
+    {realmInput && <RealmCanvas ref={realm} input={realmInput} rewards={bubbleRewards} onPick={pick} onCollect={collect} onNear={setNear} sky={sky} storms={storms} onThunder={sfx.thunder} />}
     {pops.map(q => <span key={q.id} className="realm-pop" style={{ left: q.x, top: q.y }} aria-hidden="true">+{q.xp} XP</span>)}
 
     <div className="hud-top" aria-label="Town progress">
@@ -362,11 +400,16 @@ export default function Realm({ id }: { id: string }) {
 
     {quest && !court && <button className="hud hud-quest" onClick={() => enter(quest)}><b>!</b><span>{questLine(p)}</span><em>GO ▸</em></button>}
 
+    {realmInput && !court && <Radar input={realmInput} quest={quest ? RADAR_TARGET[quest] : null} read={readMap} onTravel={travel} />}
+    {storms.length > 0 && !court && <button className="hud hud-storm" onClick={() => enter(storms[0]!)} title="Open the place where the trouble is">
+      <b aria-hidden="true">⚡</b><span>{storms.includes("harbour") ? "STORM OVER THE PORT: AN APPEAL IS OPEN" : p.status === "REVISION_REQUESTED" ? "STORM OVER THE GUILD: WORK WAS SENT BACK" : "STORM OVER THE GUILD: A REQUIRED CHECK FAILED"}</span>
+    </button>}
     <div className="hud hud-zoom" role="group" aria-label="Zoom">
       <button onClick={() => { sfx.click(); realm.current?.zoom(1); }} aria-label="Zoom in">+</button>
       <button onClick={() => { sfx.click(); realm.current?.zoom(-1); }} aria-label="Zoom out">−</button>
       <button onClick={() => { sfx.click(); realm.current?.fit(); }} aria-label="Show the whole kingdom">FIT</button>
       <button className={`hud-walk ${walking ? "on" : ""}`} onClick={() => { sfx.click(); if (walking) { realm.current?.stopWalk(); setWalking(false); setNear(null); } else { setCourt(null); realm.current?.walk(p.role === "client" ? "swordsman" : "architect"); setWalking(true); } }} aria-pressed={walking} aria-label={walking ? "Stop walking" : "Walk the kingdom"} title={walking ? "Stop walking" : "Walk the kingdom (arrow keys or WASD)"}>{walking ? "EXIT" : "WALK"}</button>
+      <button className="hud-photo" onClick={takePhoto} aria-label="Save a picture of the kingdom" title="Save a picture of the kingdom">PHOTO</button>
       <button className={`hud-sky ${sky}`} onClick={cycleSky} aria-label={`Sky: ${sky === "auto" ? "following your clock" : sky}. Change it`} title={sky === "auto" ? "Day and night follow your clock" : sky === "day" ? "Always day" : "Always night"}>{sky === "auto" ? "AUTO" : sky === "day" ? "DAY" : "NIGHT"}</button>
       <button className={`hud-sound ${sound ? "" : "off"}`} onClick={toggleSound} aria-pressed={sound} aria-label={sound ? "Mute sounds" : "Turn sounds on"} title={sound ? "Sound on" : "Sound off"}>{sound ? "♪" : "×"}</button>
     </div>

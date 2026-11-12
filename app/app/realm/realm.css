@@ -312,6 +312,14 @@ button.hud{font:inherit;color:inherit;text-align:left;cursor:pointer}
 /* ── walk mode: the pad, the door prompt, and the flying coins ── */
 .hud-zoom .hud-walk{font-size:8px;letter-spacing:1px;color:#5fd39a}
 .hud-zoom .hud-walk.on{background:#5fd39a;color:#0d1422}
+.hud-zoom .hud-photo{font-size:7px;letter-spacing:1px;color:#9fd0ff}
+.hud-radar{left:84px;bottom:84px;padding:6px 6px 5px;display:grid;gap:4px}
+.hud-radar canvas{display:block;cursor:crosshair;background:radial-gradient(ellipse at 50% 55%,#2a6fb0,#123a66);border:1px solid rgba(255,255,255,.12)}
+.hud-radar span{font:400 6px "Silkscreen",monospace;letter-spacing:1px;color:#8e9bb0;text-align:center}
+.hud-storm{left:50%;top:66px;translate:-50% 0;display:flex;align-items:center;gap:10px;padding:7px 12px;border-color:rgba(159,192,255,.5)!important;background:rgba(20,28,48,.94);color:#cfe0ff;font:400 8px "Silkscreen",monospace;letter-spacing:1px;cursor:pointer;max-width:calc(100vw - 24px)}
+.hud-storm b{font-size:13px;color:#ffe27a;animation:storm-flash 2.6s steps(1) infinite}
+@keyframes storm-flash{0%,86%{opacity:1}88%{opacity:.25}90%{opacity:1}92%{opacity:.25}94%,100%{opacity:1}}
+@media (max-width:900px){.hud-radar{display:none}.hud-storm{top:auto;bottom:150px}}
 .hud-zoom .hud-sky{font-size:7px;letter-spacing:1px;color:#ffd15c}
 .hud-zoom .hud-sky.night{background:#2a3566;color:#cfe0ff}
 .hud-zoom .hud-sky.day{background:#ffd15c;color:#0d1422}

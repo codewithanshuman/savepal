@@ -11,7 +11,7 @@
  */
 import Phaser from "phaser";
 import { SKY_DEPTH, projection } from "../reference-city/world/core/worldConstants";
-import { LAMPS, LIGHTS, LIGHT_RES, RES, bakeLights, type Asset, type Atelier } from "./textures/atelier";
+import { LAMPS, LIGHTS, bakeLights, unit, type Asset, type Atelier } from "./textures/atelier";
 import { mixColor } from "./island";
 import type { Figure } from "./rig";
 
@@ -130,7 +130,7 @@ export class Nightfall {
       if (next) {
         bakeLights(this.scene, next.asset, next.builder);
         const s = next.sprite;
-        this.windows.set(next, this.scene.add.image(s.x, s.y, next.asset.key + LIGHTS).setOrigin(s.originX, s.originY).setScale(s.scaleX * RES / LIGHT_RES).setBlendMode(Phaser.BlendModes.ADD).setDepth(NIGHT_DEPTH + 1));
+        this.windows.set(next, this.scene.add.image(s.x, s.y, next.asset.key + LIGHTS).setOrigin(s.originX, s.originY).setScale(unit(next.asset.key + LIGHTS)).setBlendMode(Phaser.BlendModes.ADD).setDepth(NIGHT_DEPTH + 1));
       }
     }
     const lights = Math.max(0, (k - .35) / .65);

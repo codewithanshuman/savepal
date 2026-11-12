@@ -211,9 +211,19 @@ function homestead(a: Atelier, h: House, shop?: { awning: number; goods: number[
     if (f > 0) a.cornice({ ...b, z1: z }, .02, 2.2, h.wall);
   }
   // the front door on the path
-  a.face(h.door ?? 0x5a3a22, [[-.2, b.v1 + .008, 10], [.12, b.v1 + .008, 10], [.12, b.v1 + .008, 34], [-.04, b.v1 + .008, 40], [-.2, b.v1 + .008, 34]]);
+  const door = h.door ?? 0x5a3a22, dv = b.v1 + .008;
+  a.face(shade(h.wall.frontLeft, 22), [[-.25, dv - .002, 10], [.17, dv - .002, 10], [.17, dv - .002, 36], [-.04, dv - .002, 44], [-.25, dv - .002, 36]]);
+  a.face(door, [[-.2, dv, 10], [.12, dv, 10], [.12, dv, 34], [-.04, dv, 40], [-.2, dv, 34]]);
+  a.line(shade(door, -30), [[-.04, dv + .001, 10], [-.04, dv + .001, 39]], .8, .8);
+  for (const z of [16, 26]) a.line(shade(door, 26), [[-.17, dv + .001, z], [.09, dv + .001, z]], .7, .6);
+  { const knob = a.at([.06, dv + .002, 22]); a.g.fillStyle(GOLD, 1).fillCircle(knob.x, knob.y, 1.3); }
+  a.box({ u0: -.3, u1: .22, v0: b.v1, v1: b.v1 + .16, z0: 0, z1: 3.5 }, M.paving);
+  a.sconce(.3, b.v1, 28);
+  if (h.storeys > 1) { const w = (b.u1 - b.u0 - .24) / 4; for (let i = 0; i < 4; i++) if (i !== 2) a.flowerBox(b.u0 + .12 + (i + .5) * w, b.v1 + .012, 12 + 34 + 4, w * .62, i % 2 ? 0xffd15c : 0xff7aa2); }
   if (h.hip) a.hip(b, 38, h.roof); else a.gable(b, 40, h.roof, h.wall, true);
-  a.box({ u0: -1.6, u1: -1.3, v0: -1.8, v1: -1.5, z0: z1 + 6, z1: z1 + 34 }, M.granite);
+  a.box({ u0: -1.6, u1: -1.3, v0: -1.8, v1: -1.5, z0: z1 + 6, z1: z1 + 31 }, M.granite);
+  a.box({ u0: -1.64, u1: -1.26, v0: -1.84, v1: -1.46, z0: z1 + 31, z1: z1 + 34 }, M.darkStone);
+  a.pad(-1.55, -1.75, -1.35, -1.55, 0x2a2622, z1 + 34.1);
   if (shop) {
     for (let k = 0; k < 6; k++) { const u0 = -2.05 + k * .42; a.face(k % 2 ? 0xfbf3e2 : shop.awning, [[u0, -.15, 40], [u0 + .42, -.15, 40], [u0 + .42, .35, 30], [u0, .35, 30]]); }
     a.box({ u0: -1.9, u1: -.6, v0: .05, v1: .4, z0: 0, z1: 13 }, M.timber);
@@ -243,6 +253,10 @@ function manor(a: Atelier, banner: number): void {
   a.storeys(b, 3, 6, 4, M.limestone, true);
   a.cornice(b, .08, 5);
   a.hip(b, 46, ROOF.slate);
+  a.face(0x4a3424, [[-.28, .258, 6], [.08, .258, 6], [.08, .258, 36], [-.1, .258, 43], [-.28, .258, 36]]);
+  a.line(0x2e2018, [[-.1, .259, 6], [-.1, .259, 42]], .8, .8);
+  { const knob = a.at([-.05, .26, 20]); a.g.fillStyle(GOLD, 1).fillCircle(knob.x, knob.y, 1.4); }
+  a.sconce(-.75, .25, 30); a.sconce(.55, .25, 30);
   a.box({ u0: -.55, u1: .35, v0: .25, v1: .6, z0: 0, z1: 6 }, M.paving);
   for (const u of [-.45, .25]) a.cylinder(u, .45, .07, 6, 48, 0xfaf3e2, 0xffffff);
   a.box({ u0: -.6, u1: .4, v0: .2, v1: .62, z0: 48, z1: 56 }, M.limestone);

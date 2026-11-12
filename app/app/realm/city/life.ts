@@ -19,7 +19,7 @@ import { PALACE_FLAGS, PALACE_POSTS } from "./textures/palace";
 import { BOUNTY_SLOTS, GUILD_FLAG, PORT_FLAG, TOWN } from "./textures/town";
 import { WINDMILL_HUB } from "./textures/farms";
 import { FLAG_FRAMES, GULL, PLANES, SAILS, flagKey, type FlagColor } from "./textures/sky";
-import { RES } from "./textures/atelier";
+import { RES, unit } from "./textures/atelier";
 import { Cast, Figure, PEOPLE, STILL, personKey, personUrl, type Effects, type FxKind, type Person, type Pose, type RoamPlan } from "./rig";
 
 export { PEOPLE, personKey, personUrl, type Person };
@@ -162,7 +162,7 @@ export class KingdomLife {
     else if (guild) this.person(cast, "architect", guild.x - .2, guild.y + 2.1, { fidget: true });
     if (bazaar) BOUNTY_SLOTS.slice(0, Math.min(state.bounties, BOUNTY_SLOTS.length)).forEach(([u, v]) => {
       const p = at(bazaar.x + u, bazaar.y + v);
-      add(this.scene.add.image(p.x, p.y + TOWN.bountyStall.anchorY, TOWN.bountyStall.key).setOrigin(.5, 1).setScale(1 / RES).setDepth(projection.depth(bazaar.x + u, bazaar.y + v) + 1));
+      add(this.scene.add.image(p.x, p.y + TOWN.bountyStall.anchorY, TOWN.bountyStall.key).setOrigin(.5, 1).setScale(unit(TOWN.bountyStall.key)).setDepth(projection.depth(bazaar.x + u, bazaar.y + v) + 1));
     });
     if (port && state.appealOpen) [[3.2, .1], [4.2, -.1]].forEach(([u, v], i) => this.person(cast, "archer", port.x + u, port.y + v, { z: 3, look: i === 1 ? -1 : 1, pose: "watch" }));
     for (const t of this.sails) t.timeScale = state.held ? 2.2 : 1;
@@ -232,7 +232,7 @@ export class KingdomLife {
       { from: [-16, H + 13], to: [W + 14, H + 13], flip: false, ms: 190000 },
     ];
     routes.forEach((r, i) => {
-      const ship = this.scene.add.image(0, 0, TOWN.galley.key).setOrigin(.5, 1 - TOWN.galley.anchorY / TOWN.galley.height).setFlipX(r.flip).setScale(1.25 / RES);
+      const ship = this.scene.add.image(0, 0, TOWN.galley.key).setOrigin(.5, 1 - TOWN.galley.anchorY / TOWN.galley.height).setFlipX(r.flip).setScale(1.25 * unit(TOWN.galley.key));
       const wake = this.scene.add.graphics();
       this.skyObjects.push(ship, wake);
       const len = Math.hypot(r.to[0] - r.from[0], r.to[1] - r.from[1]), du = (r.to[0] - r.from[0]) / len, dv = (r.to[1] - r.from[1]) / len;

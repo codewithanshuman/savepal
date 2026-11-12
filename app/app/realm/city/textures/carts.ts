@@ -116,7 +116,7 @@ export function bakeCarts(scene: Scene): void {
       for (let frame = 0; frame < 2; frame++) {
         cart(baker, index, heading, frame);
         baker.finish(frame ? trotKey(k) : k, Math.ceil(TILE_WIDTH * RES), Math.ceil(CAR_TEXTURE_HEIGHT * RES));
-        scene.textures.get(frame ? trotKey(k) : k).setFilter(1 /* LINEAR */);
+        scene.textures.get(frame ? trotKey(k) : k).setFilter(0 /* Phaser.Textures.FilterMode.LINEAR */);
       }
     }
   });

@@ -14,6 +14,10 @@ import type { SkyMode } from "./night";
 export type RealmCanvasHandle = {
   focus(place: RealmPlace): void; zoom(dir: 1 | -1): void; fit(): void; celebrate(): void;
   walk(person: Person): void; stopWalk(): void; pad(x: number, y: number): void; enter(): void;
+  /** For the radar: the camera's view and the walker, a flight to a point, and a picture of the kingdom. */
+  map(): { view: { x: number; y: number; w: number; h: number }; walker: { x: number; y: number } | null } | null;
+  flyTo(x: number, y: number): void;
+  photo(): Promise<HTMLImageElement | null>;
 };
 
 type Props = {
@@ -22,6 +26,9 @@ type Props = {
   onNear(label: string | null): void;
   /** Day, night or the viewer's clock. */
   sky: SkyMode;
+  /** Places where the agreement is in trouble; a storm stands over each. */
+  storms: RealmPlace[];
+  onThunder?(): void;
 };
 
 export const RealmCanvas = forwardRef<RealmCanvasHandle, Props>(function RealmCanvas(props, ref) {
@@ -39,6 +46,9 @@ export const RealmCanvas = forwardRef<RealmCanvasHandle, Props>(function RealmCa
     stopWalk: () => scene.current?.stopWalk(),
     pad: (x, y) => scene.current?.setWalkPad(x, y),
     enter: () => scene.current?.enterNearest(),
+    map: () => scene.current?.mapState() ?? null,
+    flyTo: (x, y) => scene.current?.flyTo(x, y),
+    photo: () => new Promise(resolve => { const s = scene.current; if (s) s.photo(resolve); else resolve(null); }),
   }), []);
 
   useEffect(() => {
@@ -52,6 +62,8 @@ export const RealmCanvas = forwardRef<RealmCanvasHandle, Props>(function RealmCa
       const s = new SavePalScene();
       s.setDpr(dpr);
       s.setSky(latest.current.sky);
+      s.setStorms(latest.current.storms);
+      s.onThunder(() => latest.current.onThunder?.());
       s.onPick(pick => latest.current.onPick(pick));
       s.onCollect((key, at) => latest.current.onCollect(key, at));
       s.onNear(label => latest.current.onNear(label));
@@ -82,6 +94,8 @@ export const RealmCanvas = forwardRef<RealmCanvasHandle, Props>(function RealmCa
   const inputKey = JSON.stringify(props.input);
   useEffect(() => { if (scene.current?.scene?.isActive()) scene.current.setRealm(latest.current.input); }, [inputKey]);
   useEffect(() => { scene.current?.setSky(props.sky); }, [props.sky]);
+  const stormKey = props.storms.join("|");
+  useEffect(() => { scene.current?.setStorms(latest.current.storms); }, [stormKey]);
   const rewardKey = props.rewards.map(r => r.key).join("|");
   useEffect(() => { scene.current?.setRewards(latest.current.rewards); }, [rewardKey]);
 
